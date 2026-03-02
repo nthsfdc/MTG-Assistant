@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { StatusBadge } from '../components/StatusBadge';
-import type { SessionDetail, TodoItem } from '../../../shared/types';
+import type { SessionDetail, NormalizedSegment, TodoItem } from '../../../shared/types';
 import { useT } from '../i18n';
 
-type Tab = 'overview' | 'transcript' | 'todos';
+type Tab = 'overview' | 'transcript' | 'minutes' | 'todos';
 
 function msToTime(ms: number) {
   const s = Math.floor(ms / 1000);
@@ -55,8 +55,9 @@ export function PostMeeting() {
   const m = detail.minutes?.data;
 
   const STEPS: Record<string, string> = {
-    batch_stt: t.post.steps.batch_stt, normalizing: t.post.steps.normalizing,
-    summarizing: t.post.steps.summarizing, exporting: t.post.steps.exporting,
+    batch_stt: t.post.steps.batch_stt, lang_detect: t.post.steps.lang_detect,
+    normalizing: t.post.steps.normalizing, summarizing: t.post.steps.summarizing,
+    exporting: t.post.steps.exporting,
   };
 
   return (
@@ -84,11 +85,12 @@ export function PostMeeting() {
         <div className="px-6 py-2.5 bg-red-500/10 border-b border-red-500/20 text-xs text-red-400">{t.post.error}{detail.errorMsg}</div>
       )}
       <div className="flex gap-0 px-6 border-b border-border flex-shrink-0">
-        {(['overview', 'transcript', 'todos'] as Tab[]).map(tb => {
+        {(['overview', 'transcript', 'minutes', 'todos'] as Tab[]).map(tb => {
           const labels: Record<Tab, string> = {
-            overview: t.post.tabs.overview,
+            overview:   t.post.tabs.overview,
             transcript: t.post.tabs.transcript,
-            todos: `${t.post.tabs.todos}${m ? ` (${m.todos.length})` : ''}`,
+            minutes:    t.post.tabs.minutes,
+            todos:      `${t.post.tabs.todos}${m ? ` (${m.todos.length})` : ''}`,
           };
           return (
             <button key={tb} onClick={() => setTab(tb)}
@@ -117,6 +119,27 @@ export function PostMeeting() {
                   <p className="text-sm text-text-dim leading-relaxed">{s.text}</p>
                 </div>
               ))}
+          </div>
+        )}
+        {tab === 'minutes' && (
+          <div className="max-w-2xl space-y-1.5">
+            {!detail.normalized || detail.normalized.length === 0
+              ? <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noTranscript}</p>
+              : detail.normalized.map((seg: NormalizedSegment, i: number) => (
+                <div key={i} className="group flex gap-3 py-1.5">
+                  <span className="text-xs text-text-muted font-mono pt-0.5 w-20 text-right flex-shrink-0">{seg.speakerId}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-text-primary leading-relaxed">{seg.normalizedText}</p>
+                    {seg.normalizedText !== seg.originalText && (
+                      <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{seg.originalText}</p>
+                    )}
+                  </div>
+                  <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 self-start mt-0.5 ${seg.method === 'llm' ? 'text-accent bg-accent/10' : 'text-text-muted bg-surface-2'}`}>
+                    {seg.method}
+                  </span>
+                </div>
+              ))
+            }
           </div>
         )}
         {tab === 'todos' && (

@@ -16,7 +16,7 @@ export interface Locale {
   live: { micAndSystem: string; micOnly: string; stopping: string; stop: string; waitingAudio: string };
   post: {
     loading: string; processing: string; error: string;
-    tabs: { overview: string; transcript: string; todos: string };
+    tabs: { overview: string; transcript: string; minutes: string; todos: string };
     steps: { batch_stt: string; lang_detect: string; normalizing: string; summarizing: string; exporting: string };
     duration: (m: number) => string;
     purpose: string; decisions: string; concerns: string; nextActions: string;
@@ -60,7 +60,7 @@ const ja: Locale = {
   },
   post: {
     loading: '読み込み中…', processing: '処理中…', error: 'エラー: ',
-    tabs: { overview: '概要', transcript: '文字起こし', todos: 'Todo' },
+    tabs: { overview: '概要', transcript: '文字起こし', minutes: '議事録', todos: 'Todo' },
     steps: { batch_stt: '音声を再認識中…', lang_detect: '言語を検出中…', normalizing: 'テキストを正規化中…', summarizing: 'AIが議事録を生成中…', exporting: 'エクスポート中…' },
     duration: m => `${m}分`,
     purpose: '目的', decisions: '決定事項', concerns: '懸念事項', nextActions: 'ネクストアクション',
@@ -109,7 +109,7 @@ const en: Locale = {
   },
   post: {
     loading: 'Loading…', processing: 'Processing…', error: 'Error: ',
-    tabs: { overview: 'Overview', transcript: 'Transcript', todos: 'Todos' },
+    tabs: { overview: 'Overview', transcript: 'Transcript', minutes: 'Minutes', todos: 'Todos' },
     steps: { batch_stt: 'Re-recognizing audio…', lang_detect: 'Detecting languages…', normalizing: 'Normalizing text…', summarizing: 'AI generating minutes…', exporting: 'Exporting…' },
     duration: m => `${m}m`,
     purpose: 'Purpose', decisions: 'Decisions', concerns: 'Concerns', nextActions: 'Next Actions',
@@ -158,7 +158,7 @@ const vi: Locale = {
   },
   post: {
     loading: 'Đang tải…', processing: 'Đang xử lý…', error: 'Lỗi: ',
-    tabs: { overview: 'Tổng quan', transcript: 'Bản ghi', todos: 'Việc cần làm' },
+    tabs: { overview: 'Tổng quan', transcript: 'Bản ghi', minutes: 'Biên bản', todos: 'Việc cần làm' },
     steps: { batch_stt: 'Đang nhận dạng âm thanh…', lang_detect: 'Đang phát hiện ngôn ngữ…', normalizing: 'Đang chuẩn hóa văn bản…', summarizing: 'AI đang tạo biên bản…', exporting: 'Đang xuất…' },
     duration: m => `${m} phút`,
     purpose: 'Mục đích', decisions: 'Quyết định', concerns: 'Mối lo ngại', nextActions: 'Hành động tiếp theo',

@@ -3,7 +3,7 @@ import { v4 as uuidv4 }          from 'uuid';
 import { sessionStore }          from '../store/session.store';
 import { fileStore }             from '../store/file.store';
 import { setActiveSession, setSttSendAudio } from './audio.ipc';
-import type { StartSessionPayload, StartSessionResult, LangCode, TranscriptSegment, SttFinalEvent } from '../../shared/types';
+import type { StartSessionPayload, StartSessionResult, LangCode, TranscriptSegment, NormalizedSegment, SttFinalEvent } from '../../shared/types';
 
 const sessionMeta = new Map<string, { lang: LangCode }>();
 
@@ -66,7 +66,12 @@ export function registerSessionIpc(win: BrowserWindow): void {
   ipcMain.handle('session:get',    (_, { sessionId }: { sessionId: string }) => {
     const s = sessionStore.get(sessionId);
     if (!s) return null;
-    return { ...s, minutes: fileStore.readJson(sessionId, 'minutes.json'), segments: fileStore.readJsonl(sessionId, 'transcript.jsonl') };
+    return {
+      ...s,
+      segments:   fileStore.readJsonl<TranscriptSegment>(sessionId, 'transcript.jsonl'),
+      normalized: fileStore.readJson<NormalizedSegment[]>(sessionId, 'normalized.json'),
+      minutes:    fileStore.readJson(sessionId, 'minutes.json'),
+    };
   });
   ipcMain.handle('session:delete', (_, { sessionId }: { sessionId: string }) => {
     sessionStore.delete(sessionId);

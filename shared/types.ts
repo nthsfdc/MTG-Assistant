@@ -64,6 +64,7 @@ export interface SessionDetail extends SessionMeta {
   targetLang: LangCode;
   errorMsg: string | null;
   segments: TranscriptSegment[];
+  normalized: NormalizedSegment[] | null;
   minutes: MeetingMinutes | null;
 }
 
