@@ -11,6 +11,25 @@ function msToTime(ms: number) {
   return `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
 }
 
+type MergedBlock = {
+  speakerId: string; normalizedText: string; originalText: string; hasLlm: boolean;
+};
+
+function mergeConsecutive(segs: NormalizedSegment[]): MergedBlock[] {
+  const out: MergedBlock[] = [];
+  for (const seg of segs) {
+    const last = out[out.length - 1];
+    if (last && last.speakerId === seg.speakerId) {
+      last.normalizedText += '　' + seg.normalizedText;
+      last.originalText   += '　' + seg.originalText;
+      if (seg.method === 'llm') last.hasLlm = true;
+    } else {
+      out.push({ speakerId: seg.speakerId, normalizedText: seg.normalizedText, originalText: seg.originalText, hasLlm: seg.method === 'llm' });
+    }
+  }
+  return out;
+}
+
 function PriorityBadge({ p }: { p: TodoItem['priority'] }) {
   const { t } = useT();
   const c = { high: 'text-red-400 bg-red-500/10', medium: 'text-amber-400 bg-amber-500/10', low: 'text-text-muted bg-surface-2' }[p];
@@ -122,20 +141,22 @@ export function PostMeeting() {
           </div>
         )}
         {tab === 'minutes' && (
-          <div className="max-w-2xl space-y-1.5">
+          <div className="max-w-2xl space-y-4">
             {!detail.normalized || detail.normalized.length === 0
               ? <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noTranscript}</p>
-              : detail.normalized.map((seg: NormalizedSegment, i: number) => (
-                <div key={i} className="group flex gap-3 py-1.5">
-                  <span className="text-xs text-text-muted font-mono pt-0.5 w-20 text-right flex-shrink-0">{seg.speakerId}</span>
+              : mergeConsecutive(detail.normalized).map((blk, i) => (
+                <div key={i} className="flex gap-3">
+                  <span className="text-xs text-text-muted font-mono pt-1 w-20 text-right flex-shrink-0">
+                    {blk.speakerId.replace('speaker_', 'S')}
+                  </span>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-text-primary leading-relaxed">{seg.normalizedText}</p>
-                    {seg.normalizedText !== seg.originalText && (
-                      <p className="text-xs text-text-muted mt-0.5 leading-relaxed">{seg.originalText}</p>
+                    <p className="text-sm text-text-primary leading-relaxed">{blk.normalizedText}</p>
+                    {blk.normalizedText !== blk.originalText && (
+                      <p className="text-xs text-text-muted mt-1 leading-relaxed">{blk.originalText}</p>
                     )}
                   </div>
-                  <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 self-start mt-0.5 ${seg.method === 'llm' ? 'text-accent bg-accent/10' : 'text-text-muted bg-surface-2'}`}>
-                    {seg.method}
+                  <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 self-start mt-1 ${blk.hasLlm ? 'text-accent bg-accent/10' : 'text-text-muted bg-surface-2'}`}>
+                    {blk.hasLlm ? 'llm' : 'rule'}
                   </span>
                 </div>
               ))
