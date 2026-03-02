@@ -80,6 +80,7 @@ export function PostMeeting() {
   const [tab,       setTab]       = useState<Tab>('overview');
   const [statusMsg, setStatusMsg] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [checked,   setChecked]   = useState<Set<number>>(new Set());
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -140,7 +141,7 @@ export function PostMeeting() {
         <div className="px-6 py-2.5 bg-red-500/10 border-b border-red-500/20 text-xs text-red-400">{t.post.error}{detail.errorMsg}</div>
       )}
       <div className="flex gap-0 px-6 border-b border-border flex-shrink-0">
-        {(['transcript', 'minutes', 'overview', 'todos'] as Tab[]).map(tb => {
+        {(['minutes', 'overview', 'todos'] as Tab[]).map(tb => {
           const labels: Record<Tab, string> = {
             overview:   t.post.tabs.overview,
             transcript: t.post.tabs.transcript,
@@ -195,22 +196,48 @@ export function PostMeeting() {
           </div>
         )}
         {tab === 'todos' && (
-          <div className="w-full space-y-2">
-            {!m || m.todos.length === 0 ? <p className="text-sm text-text-muted">{t.post.noTodos}</p> :
-              m.todos.map((todo, i) => (
-                <div key={i} className="flex items-start gap-3 px-4 py-3.5 bg-surface rounded-xl border border-border">
-                  <PriorityBadge p={todo.priority} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-text-primary">{todo.task}</p>
-                    {(todo.assignee || todo.deadline) && (
-                      <div className="flex gap-4 mt-1.5 text-xs text-text-muted">
-                        {todo.assignee && <span>👤 {todo.assignee}</span>}
-                        {todo.deadline && <span>📅 {todo.deadline}</span>}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
+          <div className="w-full">
+            {!m || m.todos.length === 0 ? <p className="text-sm text-text-muted">{t.post.noTodos}</p> : (
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left text-xs font-medium text-text-muted py-2 pr-3 w-8">#</th>
+                    <th className="py-2 pr-4 w-8"></th>
+                    <th className="text-left text-xs font-medium text-text-muted py-2 pr-4">
+                      <span className="flex items-center gap-1.5">☑ {t.post.todoCol.task}</span>
+                    </th>
+                    <th className="text-left text-xs font-medium text-text-muted py-2 pr-4 w-36">
+                      <span className="flex items-center gap-1.5">👤 {t.post.todoCol.assignee}</span>
+                    </th>
+                    <th className="text-left text-xs font-medium text-text-muted py-2 w-32">
+                      <span className="flex items-center gap-1.5">📅 {t.post.todoCol.deadline}</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {m.todos.map((todo, i) => {
+                    const done = checked.has(i);
+                    const toggle = () => setChecked(s => { const n = new Set(s); done ? n.delete(i) : n.add(i); return n; });
+                    return (
+                    <tr key={i} onClick={toggle} className={`border-b border-border/50 cursor-pointer transition-colors ${done ? 'opacity-40' : 'hover:bg-surface/50'}`}>
+                      <td className="py-2.5 pr-3 text-xs text-text-muted tabular-nums">{i + 1}</td>
+                      <td className="py-2.5 pr-4">
+                        <input type="checkbox" checked={done} onChange={toggle} onClick={e => e.stopPropagation()}
+                          className="w-3.5 h-3.5 rounded accent-accent cursor-pointer" />
+                      </td>
+                      <td className="py-2.5 pr-4">
+                        <div className="flex items-center gap-2">
+                          <PriorityBadge p={todo.priority} />
+                          <span className={`text-text-primary ${done ? 'line-through' : ''}`}>{todo.task}</span>
+                        </div>
+                      </td>
+                      <td className={`py-2.5 pr-4 text-text-dim ${done ? 'line-through' : ''}`}>{todo.assignee ?? <span className="text-text-muted/40">—</span>}</td>
+                      <td className={`py-2.5 text-text-dim ${done ? 'line-through' : ''}`}>{todo.deadline ?? <span className="text-text-muted/40">—</span>}</td>
+                    </tr>
+                  );})}
+                </tbody>
+              </table>
+            )}
           </div>
         )}
       </div>

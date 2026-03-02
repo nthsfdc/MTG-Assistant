@@ -22,6 +22,7 @@ export interface Locale {
     purpose: string; decisions: string; concerns: string; nextActions: string;
     generating: string; noData: string; noTranscript: string; noTodos: string;
     priority: { high: string; medium: string; low: string };
+    todoCol: { task: string; assignee: string; deadline: string };
   };
   status: { recording: string; processing: string; done: string; error: string };
   card: { delete: string; duration: (m: number, s: number) => string };
@@ -67,6 +68,7 @@ const ja: Locale = {
     generating: 'AIが議事録を生成中です…', noData: 'データがありません',
     noTranscript: '文字起こしはありません', noTodos: 'Todoはありません',
     priority: { high: '高', medium: '中', low: '低' },
+    todoCol: { task: 'タスク', assignee: '担当者', deadline: '期限' },
   },
   status: { recording: '録音中', processing: '処理中', done: '完了', error: 'エラー' },
   card: {
@@ -116,6 +118,7 @@ const en: Locale = {
     generating: 'AI is generating minutes…', noData: 'No data available',
     noTranscript: 'No transcript', noTodos: 'No todos',
     priority: { high: 'High', medium: 'Medium', low: 'Low' },
+    todoCol: { task: 'Task', assignee: 'Assignee', deadline: 'Deadline' },
   },
   status: { recording: 'Recording', processing: 'Processing', done: 'Done', error: 'Error' },
   card: {
@@ -165,6 +168,7 @@ const vi: Locale = {
     generating: 'AI đang tạo biên bản họp…', noData: 'Không có dữ liệu',
     noTranscript: 'Không có bản ghi', noTodos: 'Không có việc cần làm',
     priority: { high: 'Cao', medium: 'Trung bình', low: 'Thấp' },
+    todoCol: { task: 'Nhiệm vụ', assignee: 'Người thực hiện', deadline: 'Hạn chót' },
   },
   status: { recording: 'Đang ghi', processing: 'Đang xử lý', done: 'Hoàn thành', error: 'Lỗi' },
   card: {
