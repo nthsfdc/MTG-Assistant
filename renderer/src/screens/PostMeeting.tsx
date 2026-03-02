@@ -19,9 +19,17 @@ type MergedBlock = {
 const JA_PUNCT = /[。！？…]$/;
 const INNER_SPACE_JA = /\s+(?=[をがはにへのでもとや])/g; // space before particles
 
+const JA_PARTICLE_START = /^[をがはにへのでもとや]/;
+const JA_MID_END = /[をがはにへのでもとやてにをがはにへのでもとや]$/;
+
 function joinJa(prev: string, next: string): string {
-  const base = JA_PUNCT.test(prev.trimEnd()) ? prev.trimEnd() : prev.trimEnd() + '。';
-  return base + next.trimStart();
+  const trimmedPrev = prev.trimEnd();
+  const trimmedNext = next.trimStart();
+  // Mid-sentence: prev ends with particle/connector OR next starts with particle
+  if (JA_MID_END.test(trimmedPrev) || JA_PARTICLE_START.test(trimmedNext))
+    return trimmedPrev + trimmedNext;
+  const base = JA_PUNCT.test(trimmedPrev) ? trimmedPrev : trimmedPrev + '。';
+  return base + trimmedNext;
 }
 
 function joinLatin(prev: string, next: string): string {
@@ -132,7 +140,7 @@ export function PostMeeting() {
         <div className="px-6 py-2.5 bg-red-500/10 border-b border-red-500/20 text-xs text-red-400">{t.post.error}{detail.errorMsg}</div>
       )}
       <div className="flex gap-0 px-6 border-b border-border flex-shrink-0">
-        {(['overview', 'transcript', 'minutes', 'todos'] as Tab[]).map(tb => {
+        {(['transcript', 'minutes', 'overview', 'todos'] as Tab[]).map(tb => {
           const labels: Record<Tab, string> = {
             overview:   t.post.tabs.overview,
             transcript: t.post.tabs.transcript,
@@ -149,7 +157,7 @@ export function PostMeeting() {
       </div>
       <div className="flex-1 overflow-y-auto p-6">
         {tab === 'overview' && m && (
-          <div className="max-w-2xl space-y-6">
+          <div className="w-full space-y-6">
             <div><h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.purpose}</h3><p className="text-sm text-text-dim leading-relaxed">{m.purpose}</p></div>
             {m.decisions.length > 0 && <div><h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.decisions}</h3><ul className="space-y-1.5">{m.decisions.map((d, i) => <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-accent mt-0.5">✓</span>{d}</li>)}</ul></div>}
             {m.concerns.length > 0 && <div><h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.concerns}</h3><ul className="space-y-1.5">{m.concerns.map((c, i) => <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-amber-400 mt-0.5">!</span>{c}</li>)}</ul></div>}
@@ -158,7 +166,7 @@ export function PostMeeting() {
         )}
         {tab === 'overview' && !m && <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noData}</p>}
         {tab === 'transcript' && (
-          <div className="max-w-2xl space-y-2">
+          <div className="w-full space-y-2">
             {detail.segments.length === 0 ? <p className="text-sm text-text-muted">{t.post.noTranscript}</p> :
               detail.segments.map(s => (
                 <div key={s.id} className="flex gap-3">
@@ -169,27 +177,25 @@ export function PostMeeting() {
           </div>
         )}
         {tab === 'minutes' && (
-          <div className="max-w-2xl space-y-4">
+          <div className="w-full space-y-4">
             {!detail.normalized || detail.normalized.length === 0
               ? <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noTranscript}</p>
               : mergeConsecutive(detail.normalized).map((blk, i) => (
                 <div key={i} className="flex gap-3">
-                  <span className="text-xs text-text-muted font-mono pt-1 w-20 text-right flex-shrink-0">
-                    {blk.speakerId.replace('speaker_', 'S')}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-text-primary leading-relaxed">{blk.normalizedText}</p>
+                  <div className="flex flex-col items-end gap-0.5 w-12 flex-shrink-0 pt-0.5">
+                    <span className="text-xs text-text-muted font-mono">{blk.speakerId.replace('speaker_', 'S')}</span>
+                    <span className={`text-[10px] px-1 py-px rounded leading-none ${blk.hasLlm ? 'text-accent bg-accent/10' : 'text-text-muted bg-surface-2'}`}>
+                      {blk.hasLlm ? 'llm' : 'rule'}
+                    </span>
                   </div>
-                  <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 self-start mt-1 ${blk.hasLlm ? 'text-accent bg-accent/10' : 'text-text-muted bg-surface-2'}`}>
-                    {blk.hasLlm ? 'llm' : 'rule'}
-                  </span>
+                  <p className="text-sm text-text-primary leading-relaxed">{blk.normalizedText}</p>
                 </div>
               ))
             }
           </div>
         )}
         {tab === 'todos' && (
-          <div className="max-w-xl space-y-2">
+          <div className="w-full space-y-2">
             {!m || m.todos.length === 0 ? <p className="text-sm text-text-muted">{t.post.noTodos}</p> :
               m.todos.map((todo, i) => (
                 <div key={i} className="flex items-start gap-3 px-4 py-3.5 bg-surface rounded-xl border border-border">

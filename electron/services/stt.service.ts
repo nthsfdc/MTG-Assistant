@@ -40,6 +40,7 @@ export class SttService {
     const params = new URLSearchParams({
       model: 'nova-3',
       language: this.lang === 'multi' ? 'multi' : this.lang,
+      encoding: 'linear16', sample_rate: '16000', channels: '1',
       diarize: 'true', smart_format: 'true', punctuate: 'true',
       interim_results: 'true', utterance_end_ms: '1000',
     });

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu } from 'electron';
+import { app, BrowserWindow, Menu, session } from 'electron';
 import path from 'path';
 import { registerSessionIpc } from './ipc/session.ipc';
 import { registerAudioIpc }   from './ipc/audio.ipc';
@@ -35,7 +35,12 @@ function createWindow(): void {
 }
 
 Menu.setApplicationMenu(null);
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === 'media' || permission === 'mediaKeySystem');
+  });
+  createWindow();
+});
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
