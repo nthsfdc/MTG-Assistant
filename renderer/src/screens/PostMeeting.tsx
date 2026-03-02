@@ -151,9 +151,6 @@ export function PostMeeting() {
                   </span>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-text-primary leading-relaxed">{blk.normalizedText}</p>
-                    {blk.normalizedText !== blk.originalText && (
-                      <p className="text-xs text-text-muted mt-1 leading-relaxed">{blk.originalText}</p>
-                    )}
                   </div>
                   <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 self-start mt-1 ${blk.hasLlm ? 'text-accent bg-accent/10' : 'text-text-muted bg-surface-2'}`}>
                     {blk.hasLlm ? 'llm' : 'rule'}
