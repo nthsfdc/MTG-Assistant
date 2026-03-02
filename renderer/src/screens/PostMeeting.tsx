@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { StatusBadge } from '../components/StatusBadge';
-import type { SessionDetail, NormalizedSegment, TodoItem } from '../../../shared/types';
+import type { SessionDetail, NormalizedSegment, TodoItem, LangCode } from '../../../shared/types';
 import { useT } from '../i18n';
 
 type Tab = 'overview' | 'transcript' | 'minutes' | 'todos';
@@ -12,20 +12,48 @@ function msToTime(ms: number) {
 }
 
 type MergedBlock = {
-  speakerId: string; normalizedText: string; originalText: string; hasLlm: boolean;
+  speakerId: string; normalizedText: string; originalText: string;
+  hasLlm: boolean; detectedLang: LangCode | undefined;
 };
+
+const JA_PUNCT = /[。！？…]$/;
+const INNER_SPACE_JA = /\s+(?=[をがはにへのでもとや])/g; // space before particles
+
+function joinJa(prev: string, next: string): string {
+  const base = JA_PUNCT.test(prev.trimEnd()) ? prev.trimEnd() : prev.trimEnd() + '。';
+  return base + next.trimStart();
+}
+
+function joinLatin(prev: string, next: string): string {
+  return prev.trimEnd() + ' ' + next.trimStart();
+}
+
+function cleanJa(text: string): string {
+  return text.replace(INNER_SPACE_JA, '').replace(/\s+/g, '');
+}
 
 function mergeConsecutive(segs: NormalizedSegment[]): MergedBlock[] {
   const out: MergedBlock[] = [];
   for (const seg of segs) {
     const last = out[out.length - 1];
     if (last && last.speakerId === seg.speakerId) {
-      last.normalizedText += '　' + seg.normalizedText;
-      last.originalText   += '　' + seg.originalText;
+      const lang = last.detectedLang;
+      last.normalizedText = lang === 'ja'
+        ? joinJa(last.normalizedText, seg.normalizedText)
+        : joinLatin(last.normalizedText, seg.normalizedText);
+      last.originalText = lang === 'ja'
+        ? joinJa(last.originalText, seg.originalText)
+        : joinLatin(last.originalText, seg.originalText);
       if (seg.method === 'llm') last.hasLlm = true;
     } else {
-      out.push({ speakerId: seg.speakerId, normalizedText: seg.normalizedText, originalText: seg.originalText, hasLlm: seg.method === 'llm' });
+      const lang = seg.detectedLang;
+      const norm = lang === 'ja' ? cleanJa(seg.normalizedText) : seg.normalizedText;
+      out.push({ speakerId: seg.speakerId, normalizedText: norm, originalText: seg.originalText, hasLlm: seg.method === 'llm', detectedLang: lang });
     }
+  }
+  // Final pass: remove stray spaces inside Japanese blocks
+  for (const blk of out) {
+    if (blk.detectedLang === 'ja') blk.normalizedText = cleanJa(blk.normalizedText);
   }
   return out;
 }
