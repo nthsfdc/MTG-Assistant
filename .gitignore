@@ -1,0 +1,15 @@
+node_modules/
+out/
+dist/
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Electron build output
+release/
+
+# Secrets / env
+.env
+.env.*
