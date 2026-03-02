@@ -5,12 +5,14 @@ import type { LangCode, SttPartialEvent, SttFinalEvent } from '../../shared/type
 type SpeechFinalCallback = (speakerId: string, text: string) => void;
 type SegmentCallback = (event: SttFinalEvent) => void;
 
-// ws is optional — app still runs without it (no Deepgram key = no STT)
-let WS: typeof import('ws') | null = null;
-try { WS = require('ws'); } catch { /* ws not installed yet */ }
+type WsInstance = { on: Function; send: Function; close: Function; readyState: number };
+
+// require('ws') returns the WebSocket constructor directly in CJS (not .default)
+let WS: (new (url: string, opts: object) => WsInstance) | null = null;
+try { WS = require('ws'); } catch { /* ws not installed */ }
 
 export class SttService {
-  private ws: InstanceType<typeof import('ws')['default']> | null = null;
+  private ws: WsInstance | null = null;
   private sessionId: string | null = null;
   private lang: LangCode = 'ja';
   private closed = false;
@@ -41,7 +43,7 @@ export class SttService {
       diarize: 'true', smart_format: 'true', punctuate: 'true',
       interim_results: 'true', utterance_end_ms: '1000',
     });
-    const ws = new WS.default(`wss://api.deepgram.com/v1/listen?${params}`, {
+    const ws = new WS(`wss://api.deepgram.com/v1/listen?${params}`, {
       headers: { Authorization: `Token ${apiKey}` },
     });
     this.ws = ws;

@@ -1,40 +1,83 @@
 import https from 'https';
 import { BrowserWindow } from 'electron';
 import { secretStore } from '../store/secret.store';
-import type { TranslationEvent } from '../../shared/types';
+import type { LangCode, TranslationEvent } from '../../shared/types';
 
 const cache = new Map<string, string>();
-const MAX = 200;
+const MAX_CACHE = 300;
+
+const DEEPL_LANG: Record<string, string> = {
+  ja: 'JA', en: 'EN', vi: 'VI', zh: 'ZH', ko: 'KO',
+};
+
+const LANG_NAME: Record<string, string> = {
+  ja: 'Japanese', en: 'English', vi: 'Vietnamese', multi: 'English',
+};
+
+function cacheKey(text: string, targetLang: string) {
+  return `${targetLang}:${text.slice(0, 100)}`;
+}
 
 class TranslationService {
-  translate(text: string, sessionId: string, speakerId: string, win: BrowserWindow): void {
-    const key = text.slice(0, 120);
+  /**
+   * Async translate — returns translated text.
+   * Router: DeepL (if key) → GPT-4o-mini fallback.
+   */
+  async translateAsync(text: string, sourceLang: LangCode, targetLang: LangCode): Promise<string> {
+    const key = cacheKey(text, targetLang);
     const cached = cache.get(key);
-    if (cached) {
-      win.webContents.send('translation', { sessionId, speakerId, sourceText: text, translatedText: cached } satisfies TranslationEvent);
-      return;
+    if (cached) return cached;
+
+    const [deeplKey, openaiKey] = await Promise.all([
+      secretStore.get('deepl'),
+      secretStore.get('openai'),
+    ]);
+
+    let result: string;
+    if (deeplKey) {
+      result = await this._deepl(text, sourceLang, targetLang, deeplKey);
+    } else if (openaiKey) {
+      result = await this._gpt(text, targetLang, openaiKey);
+    } else {
+      throw new Error('No translation key (DeepL or OpenAI required)');
     }
-    this._doTranslate(text).then(t => {
-      if (cache.size >= MAX) cache.delete(cache.keys().next().value!);
-      cache.set(key, t);
-      win.webContents.send('translation', { sessionId, speakerId, sourceText: text, translatedText: t } satisfies TranslationEvent);
+
+    if (cache.size >= MAX_CACHE) cache.delete(cache.keys().next().value!);
+    cache.set(key, result);
+    return result;
+  }
+
+  /**
+   * Fire-and-forget translate — sends 'translation' IPC event to renderer.
+   * Used by realtime session pipeline.
+   */
+  translate(
+    text: string, sourceLang: LangCode, targetLang: LangCode,
+    sessionId: string, speakerId: string, win: BrowserWindow,
+    onResult?: (t: string) => void,
+  ): void {
+    this.translateAsync(text, sourceLang, targetLang).then(translatedText => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('translation', {
+          sessionId, speakerId, sourceText: text, translatedText,
+        } satisfies TranslationEvent);
+      }
+      onResult?.(translatedText);
     }).catch(() => { /* non-blocking */ });
   }
 
-  private async _doTranslate(text: string): Promise<string> {
-    const deeplKey = await secretStore.get('deepl');
-    if (deeplKey) return this._deepl(text, deeplKey);
-    const openaiKey = await secretStore.get('openai');
-    if (openaiKey) return this._gpt(text, openaiKey);
-    throw new Error('No translation key');
-  }
-
-  private _deepl(text: string, apiKey: string): Promise<string> {
+  private _deepl(text: string, sourceLang: LangCode, targetLang: LangCode, apiKey: string): Promise<string> {
+    const src = DEEPL_LANG[sourceLang === 'multi' ? 'ja' : sourceLang] ?? 'JA';
+    const tgt = DEEPL_LANG[targetLang] ?? 'EN';
     return new Promise((resolve, reject) => {
-      const body = new URLSearchParams({ text, target_lang: 'EN', source_lang: 'JA' }).toString();
+      const body = new URLSearchParams({ text, target_lang: tgt, source_lang: src }).toString();
       const req = https.request({
         hostname: 'api-free.deepl.com', path: '/v2/translate', method: 'POST',
-        headers: { Authorization: `DeepL-Auth-Key ${apiKey}`, 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) },
+        headers: {
+          Authorization: `DeepL-Auth-Key ${apiKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+        },
       }, res => {
         let buf = '';
         res.on('data', (c: string) => (buf += c));
@@ -47,12 +90,16 @@ class TranslationService {
     });
   }
 
-  private async _gpt(text: string, apiKey: string): Promise<string> {
+  private async _gpt(text: string, targetLang: LangCode, apiKey: string): Promise<string> {
+    const langName = LANG_NAME[targetLang] ?? 'English';
     const OpenAI = (await import('openai')).default;
     const client = new OpenAI({ apiKey });
     const r = await client.chat.completions.create({
       model: 'gpt-4o-mini',
-      messages: [{ role: 'system', content: 'Translate to English. Output ONLY the translation.' }, { role: 'user', content: text }],
+      messages: [
+        { role: 'system', content: `Translate to ${langName}. Output ONLY the translation.` },
+        { role: 'user', content: text },
+      ],
       max_tokens: 512, temperature: 0,
     });
     return r.choices[0]?.message.content?.trim() ?? '';

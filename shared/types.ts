@@ -24,7 +24,8 @@ export interface TranscriptSegment {
   speakerId: string;
   text: string;
   lang: LangCode;
-  detectedLang?: LangCode; // populated by LangDetect step (post-meeting)
+  detectedLang?: LangCode; // set at capture time (realtime) or LangDetect step (post)
+  translation?: string;    // set when TranslationRouter produces a result
   startMs: number;
   endMs: number;
 }

@@ -3,9 +3,12 @@ import { v4 as uuidv4 }          from 'uuid';
 import { sessionStore }          from '../store/session.store';
 import { fileStore }             from '../store/file.store';
 import { setActiveSession, setSttSendAudio } from './audio.ipc';
+import { detectLang }            from '../services/lang-detect.service';
 import type { StartSessionPayload, StartSessionResult, LangCode, TranscriptSegment, NormalizedSegment, SttFinalEvent } from '../../shared/types';
 
-const sessionMeta = new Map<string, { lang: LangCode }>();
+const sessionMeta     = new Map<string, { lang: LangCode; targetLang: LangCode }>();
+// In-memory segments per session — flushed to disk at stop (includes translations)
+const sessionSegments = new Map<string, TranscriptSegment[]>();
 
 export function registerSessionIpc(win: BrowserWindow): void {
 
@@ -14,29 +17,51 @@ export function registerSessionIpc(win: BrowserWindow): void {
     sessionStore.create({ id, title: p.title, startedAt: Date.now(), lang: p.lang, targetLang: p.targetLang });
     fileStore.initSession(id);
     setActiveSession(id);
-    sessionMeta.set(id, { lang: p.lang });
+    sessionMeta.set(id, { lang: p.lang, targetLang: p.targetLang });
+    sessionSegments.set(id, []);
 
-    // Lazy-import services to avoid startup cost
     try {
-      const { SttService }        = await import('../services/stt.service');
+      const { SttService }         = await import('../services/stt.service');
       const { translationService } = await import('../services/translation.service');
       const stt = new SttService(win);
-      const onTranslate = p.targetLang !== 'none'
-        ? (speakerId: string, text: string) => translationService.translate(text, id, speakerId, win)
-        : undefined;
+
       await stt.start(
         id, p.lang,
-        onTranslate,
+        undefined, // onSpeechFinal not used — translation driven per-segment below
         (evt: SttFinalEvent) => {
-          const seg: TranscriptSegment = { id: uuidv4(), sessionId: id, speakerId: evt.speakerId, text: evt.text, lang: evt.lang, startMs: evt.startMs, endMs: evt.endMs };
+          // ── Step 3: LangDetect ────────────────────────────────────────
+          const detectedLang: LangCode =
+            evt.lang !== 'multi' && evt.lang !== 'none'
+              ? evt.lang
+              : detectLang(evt.text, 'ja');
+
+          const seg: TranscriptSegment = {
+            id: uuidv4(), sessionId: id, speakerId: evt.speakerId,
+            text: evt.text, lang: evt.lang, detectedLang,
+            startMs: evt.startMs, endMs: evt.endMs,
+          };
+
+          // Store in memory + append to file (translation added later)
+          const segs = sessionSegments.get(id) ?? [];
+          segs.push(seg);
+          sessionSegments.set(id, segs);
           fileStore.appendJsonl(id, 'transcript.jsonl', seg);
+
+          // ── Step 4: TranslationRouter ─────────────────────────────────
+          if (p.targetLang === 'none' || detectedLang === p.targetLang) return;
+
+          translationService.translate(
+            seg.text, detectedLang, p.targetLang,
+            id, seg.speakerId, win,
+            (translatedText) => { seg.translation = translatedText; }, // update in-memory
+          );
         },
       );
+
       setSttSendAudio(pcm => stt.sendAudio(pcm));
-      // Store stop fn so session:stop can call it
       (win as unknown as Record<string, unknown>)._stopStt = () => stt.stop();
     } catch (err) {
-      console.error('[session:start] STT init failed (no API key?):', err);
+      console.error('[session:start] STT init failed:', err);
     }
 
     win.webContents.send('session:status', { sessionId: id, status: 'recording' });
@@ -51,6 +76,11 @@ export function registerSessionIpc(win: BrowserWindow): void {
     setSttSendAudio(null);
     const stopFn = (win as unknown as Record<string, unknown>)._stopStt as (() => void) | undefined;
     stopFn?.();
+
+    // Flush segments with translations collected so far
+    const segs = sessionSegments.get(sessionId);
+    if (segs && segs.length > 0) fileStore.writeJsonl(sessionId, 'transcript.jsonl', segs);
+    sessionSegments.delete(sessionId);
 
     const now = Date.now();
     sessionStore.update(sessionId, { status: 'processing', endedAt: now, durationMs: now - s.startedAt });
@@ -76,5 +106,6 @@ export function registerSessionIpc(win: BrowserWindow): void {
   ipcMain.handle('session:delete', (_, { sessionId }: { sessionId: string }) => {
     sessionStore.delete(sessionId);
     fileStore.deleteSession(sessionId);
+    sessionSegments.delete(sessionId);
   });
 }
