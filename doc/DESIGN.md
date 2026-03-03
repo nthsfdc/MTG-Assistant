@@ -1,6 +1,6 @@
 # MTG Assistant — Design Document
 
-**Version**: 1.2.0
+**Version**: 1.2.1
 **Stack**: Electron 31 + React 18 + TypeScript 5.5 + Tailwind CSS 3
 **Platform**: Windows (primary), macOS
 
@@ -13,6 +13,7 @@
 | 1.0.0 | 2026-02 | Initial design: realtime recording, STT, translation, post-meeting pipeline |
 | 1.1.0 | 2026-03 | **Import mode**: audio/video file import, MediaService (ffmpeg), pipeline checkpoint, crash recovery |
 | 1.2.0 | 2026-03 | **Production Hardening**: chunk-based Whisper for long audio, hierarchical summarization, secure keytar storage + encrypted fallback, concurrency guard, structured logging with rotation, cost governance guardrails |
+| 1.2.1 | 2026-03 | **Audit corrections**: chunk trigger is WAV file-size only (post-conversion); dedup uses text-similarity not startMs window; hierarchical reduction pass explicitly defined; idempotency skip validates file content not just existence |
 
 ---
 
@@ -261,32 +262,59 @@ Main: import.ipc.ts  handles session:import
 
 Whisper-1 has a hard **25 MB file size limit** and degrades above ~30 minutes of audio. BatchSttService handles long files transparently using chunk-based transcription.
 
-**Decision threshold**: audio duration > 30 minutes OR file size > 24 MB → chunk mode.
+**Decision threshold — file-size based (v1.2.1)**: After MediaService converts or extracts audio to `audio.wav`, compute `fs.statSync(wavPath).size`. If `wavFileSizeBytes > 24_000_000` (24 MB safety margin below Whisper's 25 MB hard limit) → chunk mode. Otherwise single upload. Duration is used only for UX display and cost estimation, **not** as a chunk trigger.
 
 **Chunking strategy**:
 
 ```
-1. Probe duration via MediaService.probe()
+1. stat(audio.wav) → wavFileSizeBytes
+   if wavFileSizeBytes <= 24_000_000: single-upload path (see below)
+
 2. Divide into N × 15-minute segments using ffmpeg:
      ffmpeg -i audio.wav -f segment -segment_time 900
             -c copy sessions/{id}/chunks/chunk_%03d.wav
    (stream-copy, no re-encode — fast, no quality loss)
+
 3. Transcribe each chunk sequentially:
      chunk_000.wav → TranscriptSegment[]  (offset = 0ms)
      chunk_001.wav → TranscriptSegment[]  (offset = 900_000ms)
      chunk_002.wav → TranscriptSegment[]  (offset = 1_800_000ms)
+
 4. Apply offset to every segment:
      segment.startMs += chunkIndex * CHUNK_DURATION_MS
      segment.endMs   += chunkIndex * CHUNK_DURATION_MS
-5. Merge all segment arrays → single TranscriptSegment[]
-6. Delete chunks/ directory after merge
+
+5. Deduplicate overlap segments (see below)
+
+6. Merge all segment arrays → single TranscriptSegment[]
+
+7. Delete chunks/ directory after merge
 ```
 
 **Memory usage**: each chunk is read as a stream for upload; the merged segment array is the only in-memory structure. Peak RAM ≈ single chunk size (~15 MB WAV slice) + segment JSON.
 
-**Overlap handling**: last 5 seconds of each chunk are included in the next chunk's start window to avoid cutting mid-word. Duplicate segments from overlap are deduplicated by `startMs` comparison after merge.
+**Overlap handling and deduplication (v1.2.1)**:
 
-**Single-chunk path** (≤ 30 min, ≤ 24 MB): behaves as before — no chunking, direct upload.
+Each chunk includes the last 5 seconds of the previous chunk to avoid cutting words at boundaries. After offset adjustment, adjacent chunk results may contain near-duplicate segments. Deduplication uses **text-similarity comparison**, not startMs window matching (which risks deleting valid content at chunk boundaries):
+
+```
+After merging all offset-adjusted segments into a flat array,
+sort by startMs ascending.
+
+For each pair of consecutive segments (A, B):
+  if abs(B.startMs - A.startMs) <= 3000ms:
+    normalizedA = normalize(A.text)   // lowercase, strip punctuation
+    normalizedB = normalize(B.text)
+    similarity = levenshteinSimilarity(normalizedA, normalizedB)
+    if similarity >= 0.95:            // near-exact or exact text match
+      keep A (earlier), drop B
+```
+
+`levenshteinSimilarity(a, b) = 1 - (editDistance(a,b) / max(len(a), len(b)))`
+
+This ensures only genuine transcript duplicates (same words spoken at the boundary) are removed, while short distinct utterances near a chunk boundary are preserved.
+
+**Single-chunk path** (WAV ≤ 24 MB): no chunking, direct upload. No dedup needed.
 
 **Input**:
 - `.pcm` (realtime): adds RIFF WAV header in-memory before upload
@@ -394,7 +422,28 @@ Pass 2 — Final structured minutes (GPT-4o)
 **Cost control**:
 - Pass 1 uses gpt-4o-mini (10× cheaper than gpt-4o)
 - Only Pass 2 uses gpt-4o, with a small, bounded input
-- If Pass 2 input > 12,000 tokens (edge case: very many chunks): run one more gpt-4o-mini reduction pass before GPT-4o
+
+**Reduction Pass (v1.2.1 — explicit design)**:
+
+Triggered when concatenated Pass 1 chunk summaries exceed 12,000 tokens (edge case: meetings > ~3 hours or unusually verbose summaries).
+
+```
+Reduction Pass — compress chunk summaries (GPT-4o-mini)
+  Input:  all N × ChunkSummary concatenated (> 12,000 tokens)
+  Prompt: "Compress the following meeting segment summaries into a
+           concise structured summary of <= 4,000 tokens.
+           Output as bullet lists with exactly these four sections:
+           ## Key Points
+           ## Decisions
+           ## Action Items
+           ## Risks / Concerns"
+  Model:  gpt-4o-mini, temperature: 0, max_tokens: 1200
+  → ReducedSummary (structured bullet list, <= 4,000 tokens)
+
+Pass 2 then uses ReducedSummary as input instead of raw chunk summaries.
+```
+
+The fixed output format (four labeled sections) ensures Pass 2 has consistent, structured context to generate `MeetingMinutes` JSON without information loss from unstructured compression.
 
 **Failure fallback**:
 - If any Pass 1 chunk fails: include raw (un-summarized) segment text for that block, continue
@@ -652,7 +701,7 @@ Retry button calls `session:retryStep` IPC with `{ sessionId, step: 'normalizing
 | Unsupported file format | File dialog filter prevents selection; if bypassed, ffprobe returns error → shown on probe |
 | Whisper API failure | Pipeline pauses at `batch_stt`, writes error to `pipeline.json`, emits `session:status` with `status:'error'` → retry button in PostMeeting |
 | GPT rate limit / timeout | Same pattern for `normalizing` and `summarizing` steps |
-| Import of 2h file (large Whisper payload) | Whisper's 25MB limit: `BatchSttService` checks file size after WAV conversion; if > 24MB, splits into 10-min chunks using ffmpeg segment muxer, transcribes each, merges `TranscriptSegment[]` with time offsets |
+| Import of long audio (WAV > 24 MB after conversion) | `BatchSttService` checks `wavFileSizeBytes` after MediaService conversion; if > 24 MB, splits into 15-min chunks via ffmpeg segment muxer, transcribes each sequentially, deduplicates overlap by text-similarity (≥ 0.95), merges with offset-adjusted `TranscriptSegment[]` |
 | App crash mid-ffmpeg | ffmpeg child process dies with app; `pipeline.json` will still show `prepare_audio: pending` → recoverable on restart |
 | Disk full during conversion | ffmpeg exits non-zero; caught → `FfmpegError` → error state in PostMeeting |
 
@@ -697,15 +746,17 @@ When `status === 'error_recoverable'`, show a **Resume** banner:
 
 Resume calls `session:retryStep` with the next incomplete step. The pipeline resumes from the checkpoint — already-completed steps (with their output files present) are skipped.
 
-**Step idempotency**: before running a step, check if its output file already exists and is non-empty. If so, skip and mark as completed. This prevents redundant API calls on resume.
+**Step idempotency (v1.2.1 — content validation)**: before running a step, check if its output file exists **and passes content validation**. File existence alone is not sufficient — a crash mid-write can leave a partial or corrupt file. If validation fails, treat the step as incomplete and re-run it.
 
-| Step | Output file checked |
-|------|-------------------|
-| `batch_stt` | `transcript.jsonl` |
-| `lang_detect` | `transcript.jsonl` (with `detectedLang` populated) |
-| `normalizing` | `normalized.json` |
-| `summarizing` | `minutes.json` |
-| `exporting` | `export.md` |
+| Step | Output file | Validation rule |
+|------|-------------|-----------------|
+| `batch_stt` | `transcript.jsonl` | Every line must `JSON.parse` without error; file must have ≥ 1 line |
+| `lang_detect` | `transcript.jsonl` | Same as above, plus every parsed object must have a `detectedLang` field |
+| `normalizing` | `normalized.json` | `JSON.parse` succeeds; result is a non-empty array |
+| `summarizing` | `minutes.json` | `JSON.parse` succeeds; result has all required top-level keys: `sessionId`, `generatedAt`, `language`, `data`; `data` has keys `purpose`, `decisions`, `todos`, `concerns`, `next_actions` |
+| `exporting` | `export.md` | File size ≥ 100 bytes |
+
+Validation failures are logged at `warn` level with the session ID and step name. The step is re-queued from scratch — no partial output is used.
 
 ---
 
@@ -1178,7 +1229,7 @@ ffprobePath = path.join(base, 'node_modules/ffprobe-static/...')
 | F1 | Import MP3 ~10 min | Converts to WAV, Whisper transcribes, full pipeline runs, PostMeeting shows minutes |
 | F2 | Import MP4 ~30 min with audio | Audio extracted, same pipeline, correct duration in SessionMeta |
 | F3 | Import MP4 with no audio stream | `probe` returns `hasAudio: false`, Import button disabled, no session created |
-| F4 | Import audio file > 24MB (2h MP3) | Chunked by BatchSttService, all segments merged, timestamps correct |
+| F4 | Import audio file where converted WAV > 24 MB (e.g., 2h MP3 → ~110 MB WAV) | `BatchSttService` checks `wavFileSizeBytes` post-conversion; chunk mode triggered; all segments merged with correct offsets; text-similarity dedup removes boundary duplicates; timestamps correct |
 | F5 | Whisper API failure (network off) | Status = error at `batch_stt`, retry button shown, retry succeeds when network restored |
 | F6 | App crash during `normalizing` | Relaunch: session shows `error_recoverable`, resume from `normalizing`, skips `batch_stt`/`lang_detect` |
 | F7 | App crash during `prepare_audio` (ffmpeg running) | Relaunch: `audio.wav` absent or partial (tmp not renamed), session marked `error_recoverable` with message "re-import required" |
@@ -1292,6 +1343,18 @@ Shown when `session.status === 'error_recoverable'`. Button calls `session:resum
 
 See the updated BatchSttService in §5 for full design. This section documents the operational constraints.
 
+#### Chunk trigger
+
+Chunking is triggered by **WAV file size after conversion**, not duration:
+
+```
+stat(audio.wav) → wavFileSizeBytes
+if wavFileSizeBytes > 24_000_000: chunk mode
+else:                              single upload
+```
+
+Duration (from `MediaService.probe()`) is stored in `SessionMeta.durationMs` for UX display and cost estimation only — it does not influence the chunk decision.
+
 #### Chunk storage lifecycle
 
 ```
@@ -1301,7 +1364,7 @@ sessions/{id}/chunks/    ← created before chunking starts
     ...
 ```
 
-Chunks are **transient**: deleted immediately after the segment merge is complete and `transcript.jsonl` is written. On startup recovery scan: if `chunks/` exists but `transcript.jsonl` is absent → step `batch_stt` must be retried from scratch (chunks are regenerated).
+Chunks are **transient**: deleted immediately after the segment merge and deduplication are complete and `transcript.jsonl` is written. On startup recovery scan: if `chunks/` exists but `transcript.jsonl` is absent (or fails validation) → step `batch_stt` must be retried from scratch; chunks are regenerated.
 
 #### Time offset merging
 
@@ -1315,14 +1378,23 @@ for each chunk at index i:
     segment.endMs   += offset
 ```
 
-Overlap window (last 5 seconds duplicated at chunk boundary):
+#### Overlap deduplication (v1.2.1)
+
+Each ffmpeg chunk includes the last 5 seconds of the previous chunk's audio to prevent mid-word cuts. After offset adjustment, boundary segments may be near-duplicates. Deduplication uses **text-similarity**, not startMs window matching (which incorrectly deletes distinct utterances near boundaries):
 
 ```
-chunk_000: 0s → 905s  (5s overlap at end)
-chunk_001: 900s → 1805s  (5s overlap start/end)
-dedup: remove segments where startMs is within [chunkStart, chunkStart + 5000]
-       and an identical segment exists in previous chunk's tail
+Sort merged segments by startMs ascending.
+
+For each consecutive pair (A, B):
+  if abs(B.startMs - A.startMs) <= 3000:
+    normA = lowercase(stripPunctuation(A.text))
+    normB = lowercase(stripPunctuation(B.text))
+    sim   = 1 - editDistance(normA, normB) / max(len(normA), len(normB))
+    if sim >= 0.95:
+      keep A, discard B
 ```
+
+Only near-exact text matches within a 3-second window are deduplicated. Short distinct utterances near chunk boundaries are always preserved.
 
 #### Memory ceiling
 
@@ -1337,7 +1409,45 @@ dedup: remove segments where startMs is within [chunkStart, chunkStart + 5000]
 
 ### 16.3 Hierarchical Summarization
 
-See the updated SummarizationService in §5 for full design. This section documents cost governance specifics.
+See the updated SummarizationService in §5 for full design. This section documents cost governance specifics and the Reduction Pass.
+
+#### Reduction Pass design (v1.2.1)
+
+Triggered when concatenated Pass 1 chunk summaries exceed 12,000 tokens:
+
+```
+Trigger check:
+  estimateTokens(allChunkSummaries.join('\n\n')) > 12_000
+
+Reduction Pass — GPT-4o-mini compression
+  Input:  all N × ChunkSummary strings concatenated (> 12,000 tokens)
+  Prompt: "Compress the following meeting segment summaries into a
+           concise structured summary of no more than 4,000 tokens.
+           Output only these four labeled sections as bullet lists:
+           ## Key Points
+           ## Decisions
+           ## Action Items
+           ## Risks / Concerns
+           Do not add any other sections or commentary."
+  Model:  gpt-4o-mini, temperature: 0, max_tokens: 1200
+  → ReducedSummary  (structured bullet list, ≤ 4,000 tokens)
+
+Pass 2 receives ReducedSummary instead of raw chunk summaries.
+```
+
+The fixed four-section output format ensures Pass 2 (GPT-4o) has structured, bounded context. Unstructured compression is avoided because it causes GPT-4o to miss action items or merge unrelated decisions.
+
+**Pass summary chain**:
+
+```
+Long transcript:   Chunks → [Pass 1] → ChunkSummaries
+                                          ↓ (if > 12k tokens)
+                                       [Reduction Pass] → ReducedSummary
+                                          ↓
+                              [Pass 2 GPT-4o] → MeetingMinutes JSON
+
+Short transcript:  Direct → [Pass 2 GPT-4o] → MeetingMinutes JSON
+```
 
 #### Token estimation (pre-summarization)
 
