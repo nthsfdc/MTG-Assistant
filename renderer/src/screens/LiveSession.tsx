@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useCaptionStore } from '../store/captionStore';
-import { useLiveIpc } from '../hooks/useIpc';
-import { useAudioCapture } from '../hooks/useAudioCapture';
-import type { CaptionLine } from '../store/captionStore';
+import { useCaptionStore }   from '../store/captionStore';
+import { useRecordingStore } from '../store/recordingStore';
+import { useRecording }      from '../context/RecordingContext';
+import { useLiveIpc }        from '../hooks/useIpc';
+import type { CaptionLine }  from '../store/captionStore';
 import { useT } from '../i18n';
 
 const PALETTE = [
@@ -41,24 +42,22 @@ export function LiveSession() {
   const { id: sessionId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { lines, clear } = useCaptionStore();
-  const { start, stop }  = useAudioCapture();
-  const [elapsed,     setElapsed]     = useState(0);
-  const [hasSysAudio, setHasSysAudio] = useState(false);
-  const [stopping,    setStopping]    = useState(false);
+  const { startRecording, stopRecording } = useRecording();
+  const { sessionId: activeId, elapsed, hasSysAudio } = useRecordingStore();
+  const [stopping, setStopping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const startedAt = useRef(Date.now());
 
   useLiveIpc(sessionId ?? null, { onDone: () => navigate(`/session/${sessionId}`) });
 
   useEffect(() => {
-    clear(); colorMap.clear(); colorIdx = 0;
-    window.api.settings.get().then(s => {
-      start(s.inputDeviceId || undefined)
-        .then(({ hasSysAudio }) => setHasSysAudio(hasSysAudio))
-        .catch(console.error);
-    });
-    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt.current) / 1000)), 1000);
-    return () => { clearInterval(timer); stop(); };
+    // Only start audio if this session isn't already being recorded
+    if (activeId !== sessionId) {
+      clear(); colorMap.clear(); colorIdx = 0;
+      window.api.settings.get().then(s => {
+        startRecording(sessionId!, s.inputDeviceId || undefined).catch(console.error);
+      });
+    }
+    // No cleanup stop — audio persists across route changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -70,12 +69,13 @@ export function LiveSession() {
   const handleStop = useCallback(async () => {
     if (stopping || !sessionId) return;
     setStopping(true);
-    stop();
+    stopRecording();
     await window.api.session.stop(sessionId);
     navigate(`/session/${sessionId}`);
-  }, [stopping, sessionId, stop, navigate]);
+  }, [stopping, sessionId, stopRecording, navigate]);
 
   const elapsed_str = `${pad(Math.floor(elapsed / 60))}:${pad(elapsed % 60)}`;
+
 
   return (
     <div className="flex flex-col h-full">

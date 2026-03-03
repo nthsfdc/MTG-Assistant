@@ -34,4 +34,6 @@ export function registerSettingsIpc(): void {
     secretStore.set(service, key));
   ipcMain.handle('apikey:exists', (_, { service }: { service: string }) =>
     secretStore.exists(service));
+  ipcMain.handle('apikey:get',    (_, { service }: { service: string }) =>
+    secretStore.get(service));
 }

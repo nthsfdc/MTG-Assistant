@@ -15,6 +15,10 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     }).catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    document.documentElement.lang = uiLang;
+  }, [uiLang]);
+
   function setUiLang(l: UILang) {
     setUiLangState(l);
     window.api.settings.save({ uiLang: l } as never).catch(() => undefined);

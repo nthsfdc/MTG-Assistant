@@ -4,39 +4,86 @@ import type { UILang } from '../i18n/locales';
 
 type Service = 'deepgram' | 'openai' | 'deepl';
 
+function maskKey(k: string): string {
+  if (k.length <= 10) return '•'.repeat(k.length);
+  return k.slice(0, 5) + '•••••••••••' + k.slice(-5);
+}
+
 function ApiKeyRow({ svc }: { svc: { key: Service; label: string; hint: string } }) {
   const { t } = useT();
-  const [exists, setExists] = useState(false);
-  const [value,  setValue]  = useState('');
-  const [saving, setSaving] = useState(false);
-  const [flash,  setFlash]  = useState<'ok'|'err'|null>(null);
+  const [exists,   setExists]   = useState(false);
+  const [realKey,  setRealKey]  = useState<string | null>(null);
+  const [showKey,  setShowKey]  = useState(false);
+  const [isDirty,  setIsDirty]  = useState(false);
+  const [newValue, setNewValue] = useState('');
+  const [saving,   setSaving]   = useState(false);
+  const [flash,    setFlash]    = useState<'ok'|'err'|null>(null);
 
   useEffect(() => { window.api.apikey.exists(svc.key).then(setExists); }, [svc.key]);
 
-  async function save() {
-    const v = value.trim(); if (!v || saving) return;
-    setSaving(true);
-    try { await window.api.apikey.set(svc.key, v); setExists(true); setValue(''); setFlash('ok'); }
-    catch { setFlash('err'); } finally { setSaving(false); setTimeout(() => setFlash(null), 2000); }
+  async function handleShow() {
+    if (!showKey && realKey === null) {
+      const k = await window.api.apikey.get(svc.key);
+      setRealKey(k ?? '');
+    }
+    setShowKey(v => !v);
   }
 
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setIsDirty(true);
+    setNewValue(e.target.value);
+  }
+
+  function handleFocus() {
+    if (!isDirty) setNewValue('');
+    setIsDirty(true);
+  }
+
+  async function save() {
+    const v = newValue.trim(); if (!v || saving) return;
+    setSaving(true);
+    try {
+      await window.api.apikey.set(svc.key, v);
+      setExists(true); setNewValue(''); setIsDirty(false); setRealKey(null); setShowKey(false); setFlash('ok');
+    }
+    catch { setFlash('err'); }
+    finally { setSaving(false); setTimeout(() => setFlash(null), 2000); }
+  }
+
+  const displayValue = isDirty
+    ? newValue
+    : exists
+      ? (showKey ? (realKey ?? '') : maskKey(realKey ?? '••••••••••••••••••••'))
+      : newValue;
+
   return (
-    <div className="flex items-start gap-3">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-sm font-medium text-text-dim">{svc.label}</span>
-          <span className="text-xs text-text-muted">{svc.hint}</span>
-          {exists && <span className="text-xs text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded ml-auto">{t.settings.configured}</span>}
-        </div>
-        <input type="password" value={value} onChange={e => setValue(e.target.value)} onKeyDown={e => e.key === 'Enter' && save()}
-          placeholder={exists ? t.settings.enterNewKey : t.settings.pasteKey}
-          className="w-full px-3 py-2 bg-surface-2 border border-border rounded-lg text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-accent font-mono"
-        />
+    <div>
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="text-sm font-medium text-text-dim">{svc.label}</span>
+        <span className="text-xs text-text-muted">{svc.hint}</span>
+        {exists && <span className="text-xs text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded ml-auto">{t.settings.configured}</span>}
       </div>
-      <button onClick={save} disabled={!value.trim() || saving}
-        className={`mt-7 px-3.5 py-2 text-sm rounded-lg transition-colors disabled:opacity-40 ${flash==='ok'?'bg-emerald-500 text-white':flash==='err'?'bg-red-500 text-white':'bg-accent hover:bg-accent-hover text-white'}`}>
-        {flash==='ok'?'✓':flash==='err'?'✕':saving?'…':t.settings.save}
-      </button>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={displayValue}
+          onChange={handleChange}
+          onFocus={handleFocus}
+          onKeyDown={e => e.key === 'Enter' && save()}
+          placeholder={exists ? t.settings.enterNewKey : t.settings.pasteKey}
+          className="flex-1 px-3 py-2 bg-surface-2 border border-border rounded-lg text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-accent font-mono"
+        />
+        <button onClick={save} disabled={!isDirty || !newValue.trim() || saving}
+          className={`px-3.5 py-2 text-sm rounded-lg transition-colors disabled:opacity-40 ${flash==='ok'?'bg-emerald-500 text-white':flash==='err'?'bg-red-500 text-white':'bg-accent hover:bg-accent-hover text-white'}`}>
+          {flash==='ok'?'✓':flash==='err'?'✕':saving?'…':t.settings.save}
+        </button>
+        {exists && (
+          <button onClick={handleShow}
+            className="px-3 py-2 text-xs text-text-muted bg-surface-2 border border-border rounded-lg hover:text-text-primary hover:border-accent transition-colors whitespace-nowrap">
+            {showKey ? '非表示' : '表示'}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

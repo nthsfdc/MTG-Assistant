@@ -50,6 +50,8 @@ const api = {
       ipcRenderer.invoke('apikey:set', { service, key }) as Promise<void>,
     exists: (service: 'deepgram' | 'openai' | 'deepl') =>
       ipcRenderer.invoke('apikey:exists', { service }) as Promise<boolean>,
+    get: (service: 'deepgram' | 'openai' | 'deepl') =>
+      ipcRenderer.invoke('apikey:get', { service }) as Promise<string | null>,
   },
 
   on: {

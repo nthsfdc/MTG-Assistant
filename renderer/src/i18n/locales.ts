@@ -2,6 +2,7 @@ export type UILang = 'ja' | 'en' | 'vi';
 
 export interface Locale {
   dateLocale: string;
+  appName: string;
   nav: { dashboard: string; settings: string };
   dashboard: {
     title: string; loading: string;
@@ -39,7 +40,8 @@ export interface Locale {
 
 const ja: Locale = {
   dateLocale: 'ja-JP',
-  nav: { dashboard: 'ダッシュボード', settings: '設定' },
+  appName: '会議アシスタント',
+  nav: { dashboard: '会議履歴', settings: '設定' },
   dashboard: {
     title: 'ミーティング', loading: '読み込み中…',
     sessions: n => `${n} セッション`,
@@ -89,7 +91,8 @@ const ja: Locale = {
 
 const en: Locale = {
   dateLocale: 'en-US',
-  nav: { dashboard: 'Dashboard', settings: 'Settings' },
+  appName: 'Meeting Assistant',
+  nav: { dashboard: 'Meeting History', settings: 'Settings' },
   dashboard: {
     title: 'Meetings', loading: 'Loading…',
     sessions: n => `${n} Session${n !== 1 ? 's' : ''}`,
@@ -139,7 +142,8 @@ const en: Locale = {
 
 const vi: Locale = {
   dateLocale: 'vi-VN',
-  nav: { dashboard: 'Tổng quan', settings: 'Cài đặt' },
+  appName: 'Meeting Assistant',
+  nav: { dashboard: 'Lịch sử Meeting', settings: 'Cài đặt' },
   dashboard: {
     title: 'Cuộc họp', loading: 'Đang tải…',
     sessions: n => `${n} phiên`,
