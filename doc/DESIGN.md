@@ -1,6 +1,6 @@
 # MTG Assistant — Design Document
 
-**Version**: 1.2.2
+**Version**: 1.3.0
 **Stack**: Electron 31 + React 18 + TypeScript 5.5 + Tailwind CSS 3
 **Platform**: Windows (primary), macOS
 
@@ -15,6 +15,7 @@
 | 1.2.0 | 2026-03 | **Production Hardening**: chunk-based Whisper for long audio, hierarchical summarization, secure keytar storage + encrypted fallback, concurrency guard, structured logging with rotation, cost governance guardrails |
 | 1.2.1 | 2026-03 | **Audit corrections**: chunk trigger is WAV file-size only (post-conversion); dedup uses text-similarity not startMs window; hierarchical reduction pass explicitly defined; idempotency skip validates file content not just existence |
 | 1.2.2 | 2026-03 | **CTO review fixes**: architecture diagram corrected (keytar + vault.enc fallback, not vault.json); `apikey:get` removed (plaintext leak), replaced with `apikey:getMasked`; chunk overlap removed (Approach A — no overlap, dedup is optional guard only); Whisper cost corrected ($0.006/min: 30 min=$0.18, 1 h=$0.36, 2 h=$0.72) |
+| 1.3.0 | 2026-03 | **Enterprise Hardening & Storage Flexibility**: configurable storageRootPath (external drive support); optional source file archiving vs. path-reference mode; auto-cleanup service; exponential backoff for API resilience (Whisper + GPT); PipelineLock deadlock prevention (2 h timeout, 30 s heartbeat, 10 min watchdog); Reduction Pass redesigned to prose-based pipeline (no forced bullet structure); ffmpeg code-signing requirements for CI/CD; disk usage monitoring with low-space warning |
 
 ---
 
@@ -43,7 +44,7 @@ MTG Assistant is a **local-first** desktop application that records (or imports)
 | STT | Deepgram WebSocket (streaming) | OpenAI Whisper (batch) |
 | Translation | Yes (real-time, not saved) | No (post-meeting only via summary) |
 | Post-processing pipeline | Same 5-step pipeline | Same 5-step pipeline |
-| Data stored | audio.pcm | audio.wav + source/{original} |
+| Data stored | audio.pcm | audio.wav + optional source/{original} |
 | Recovery | N/A (live) | Yes — pipeline.json checkpoint |
 
 ---
@@ -74,12 +75,13 @@ MTG Assistant is a **local-first** desktop application that records (or imports)
 │  │ Services                                               │  │
 │  │  SttService      BatchSttService   TranslationService  │  │
 │  │  LangDetect      Normalization     Summarization       │  │
-│  │  PostMeeting     Export            MediaService ← NEW  │  │
+│  │  PostMeeting     Export            MediaService        │  │
+│  │  AutoCleanup ← NEW v1.3                                │  │
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌─────────────────────────────────────────────────────┐     │
 │  │ Stores                                              │     │
-│  │  session.store (app.json)                           │     │
-│  │  file.store    (sessions/{id}/...)       ← updated  │     │
+│  │  session.store (userData/app.json)                  │     │
+│  │  file.store    ({storageRoot}/sessions/{id}/...)    │     │
 │  │  secret.store  (keytar + vault.enc fallback)        │     │
 │  └─────────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────────┘
@@ -87,6 +89,8 @@ MTG Assistant is a **local-first** desktop application that records (or imports)
               ▼ External APIs
    Deepgram · OpenAI (Whisper + GPT-4o) · DeepL
 ```
+
+**`storageRoot`** defaults to `app.getPath('userData')` and is user-configurable (see §17.1). Small metadata files (`app.json`, `settings.json`, `vault.enc`, `logs/`) always remain in `userData` regardless of `storageRoot`.
 
 ### Process Separation
 
@@ -96,6 +100,7 @@ MTG Assistant is a **local-first** desktop application that records (or imports)
 | STT WebSocket, file I/O, API calls | Main |
 | ffmpeg child process management | Main only |
 | API key exposure, raw PCM/WAV | Main only — never in renderer |
+| Auto-cleanup, disk monitoring | Main only |
 
 Security: `contextIsolation: true`, `nodeIntegration: false`. Preload exposes typed `window.api` only.
 
@@ -114,7 +119,7 @@ Security: `contextIsolation: true`, `nodeIntegration: false`. Preload exposes ty
 | `session:delete` | `{ sessionId }` | `void` |
 | `session:import` | `ImportPayload` | `{ sessionId }` |
 | `session:retryStep` | `{ sessionId, step }` | `void` |
-| `session:resumePipeline` | `{ sessionId }` | `void` ← **NEW v1.2** |
+| `session:resumePipeline` | `{ sessionId }` | `void` |
 | `media:probe` | `{ filePath }` | `MediaProbeResult` |
 | `settings:get` | — | `AppSettings` |
 | `settings:save` | `Partial<AppSettings>` | `void` |
@@ -122,6 +127,9 @@ Security: `contextIsolation: true`, `nodeIntegration: false`. Preload exposes ty
 | `apikey:getMasked` | `{ service }` | `string \| null` — returns `"****abcd"` (last 4 chars) or `null` |
 | `apikey:exists` | `{ service }` | `boolean` |
 | `export:markdown` | `{ sessionId }` | `{ filePath }` |
+| `storage:getStats` | — | `StorageStats` ← **NEW v1.3** |
+| `storage:setRoot` | `{ path }` | `{ ok, error? }` ← **NEW v1.3** |
+| `storage:runCleanup` | `{ dryRun? }` | `CleanupReport` ← **NEW v1.3** |
 
 ### Renderer → Main (send, high-frequency)
 
@@ -136,11 +144,12 @@ Security: `contextIsolation: true`, `nodeIntegration: false`. Preload exposes ty
 | `stt:partial` | `{ sessionId, speakerId, text }` |
 | `stt:final` | `{ sessionId, speakerId, text, lang, startMs, endMs }` |
 | `translation` | `{ sessionId, sourceText, translatedText, speakerId }` |
-| `session:status` | `{ sessionId, status, step?, progress? }` ← extended |
+| `session:status` | `{ sessionId, status, step?, progress?, warning? }` ← extended |
 | `session:done` | `{ sessionId, exportPath }` |
 | `error` | `{ code, message, sessionId? }` |
+| `storage:warning` | `{ freeBytes, threshold }` ← **NEW v1.3** — low disk space alert |
 
-**`session:status`** is reused for both realtime post-processing and import pipeline progress. Extended in v1.2.0:
+**`session:status`** is reused for both realtime post-processing and import pipeline progress:
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -148,8 +157,10 @@ Security: `contextIsolation: true`, `nodeIntegration: false`. Preload exposes ty
 | `status` | `SessionStatus` | — |
 | `step` | `PipelineStep?` | current step |
 | `progress` | number? | 0–100, per-step % |
-| `lastCompletedStep` | `PipelineStep?` | ← **NEW v1.2** — for resume banner |
-| `error` | string? | ← **NEW v1.2** — error message if status=error |
+| `lastCompletedStep` | `PipelineStep?` | for resume banner |
+| `error` | string? | error message if status=error |
+| `warning` | `'HIGH_COST_EXPECTED'?` | ← **NEW v1.3** — cost warning field |
+| `retryAttempt` | number? | ← **NEW v1.3** — 1–3 during backoff retries |
 
 ---
 
@@ -197,7 +208,7 @@ Triggered by `session:stop` (realtime) or at end of audio preparation (import). 
 0. [checkpoint]  write pipeline.json { step: 'batch_stt', status: 'pending' }
 
 1. batch_stt    → getAudioForWhisper(sessionId)   ← file.store helper (pcm or wav)
-                  Whisper API → TranscriptSegment[]
+                  Whisper API → TranscriptSegment[]  [with exponential backoff, §17.2]
                   fallback: realtime transcript.jsonl (realtime only)
                   [checkpoint]  { step: 'lang_detect', status: 'pending' }
 
@@ -209,7 +220,7 @@ Triggered by `session:stop` (realtime) or at end of audio preparation (import). 
                   → normalized.json
                   [checkpoint]  { step: 'summarizing', status: 'pending' }
 
-4. summarizing  → GPT-4o structured output
+4. summarizing  → GPT-4o structured output (prose pipeline, §17.4)
                   → minutes.json { purpose, decisions, todos, concerns, next_actions }
                   [checkpoint]  { step: 'exporting', status: 'pending' }
 
@@ -221,7 +232,7 @@ Triggered by `session:stop` (realtime) or at end of audio preparation (import). 
                   → session:done event
 ```
 
-### 4.3 Import Flow (new)
+### 4.3 Import Flow (updated v1.3.0 — source file handling)
 
 ```
 Renderer: ImportScreen
@@ -233,20 +244,30 @@ Renderer: ImportScreen
 
 Main: import.ipc.ts  handles session:import
     1. sessionStore.create({ title, lang, targetLang, inputType:'import', status:'processing' })
-    2. fileStore.copySource(sessionId, sourcePath)      → sessions/{id}/source/{filename}
+    2. Source file handling (based on StorageSettings.copySourceFile):
+       if copySourceFile = true:
+         fileStore.copySource(sessionId, sourcePath) → sessions/{id}/source/{filename}
+         SessionMeta.sourceArchivedPath = sessions/{id}/source/{filename}
+       else:
+         SessionMeta.sourceAbsolutePath = sourcePath   (reference only, no copy)
        [checkpoint]  { step: 'prepare_audio', status: 'pending' }
 
     3. MediaService
+       resolves audio path from sourceArchivedPath or sourceAbsolutePath
        if sourceType === 'video':
-         mediaService.extractAudio(sourcePath, tmpWavPath)
+         mediaService.extractAudio(resolvedPath, tmpWavPath)
        else:
-         mediaService.convertTo16kMonoWav(sourcePath, tmpWavPath)
-       → sessions/{id}/audio.wav (written by streaming ffmpeg pipe, never in RAM)
+         mediaService.convertTo16kMonoWav(resolvedPath, tmpWavPath)
+       → {storageRoot}/sessions/{id}/audio.wav (streaming ffmpeg pipe, never in RAM)
        [checkpoint]  { step: 'batch_stt', status: 'pending' }
 
     4. postMeetingService.run(sessionId, { audioPath: 'audio.wav' })
        (same pipeline as §4.2 — all 5 steps)
 ```
+
+**Source file tradeoffs** (see §17.1 for full design):
+- `copySourceFile = false` (default): no disk duplication; import fails if original file is moved.
+- `copySourceFile = true`: file archived locally; `prepare_audio` can be retried even if original is deleted.
 
 **Key constraint**: ffmpeg is spawned as a child process. Output is written directly to `audio.wav` on disk via ffmpeg's `-y` flag and output path argument — the Node process never buffers the full audio in RAM.
 
@@ -258,8 +279,9 @@ Main: import.ipc.ts  handles session:import
 - Deepgram nova-3 WebSocket (`wss://api.deepgram.com/v1/listen`)
 - Params: `model=nova-3&diarize=true&smart_format=true&language=multi`
 - Reconnect: once after 2s on disconnect, then degrade silently
+- **WebSocket inactivity timeout (v1.3.0)**: if no message received for 60s, force reconnect. See §17.3.
 
-### BatchSttService (updated — v1.2.0: chunk-based for long audio)
+### BatchSttService (updated — v1.2.0: chunk-based; v1.3.0: retry policy)
 
 Whisper-1 has a hard **25 MB file size limit** and degrades above ~30 minutes of audio. BatchSttService handles long files transparently using chunk-based transcription.
 
@@ -285,7 +307,7 @@ Whisper-1 has a hard **25 MB file size limit** and degrades above ~30 minutes of
      segment.startMs += chunkIndex * CHUNK_DURATION_MS
      segment.endMs   += chunkIndex * CHUNK_DURATION_MS
 
-5. Deduplicate overlap segments (see below)
+5. Deduplicate overlap segments (optional guard — see below)
 
 6. Merge all segment arrays → single TranscriptSegment[]
 
@@ -293,6 +315,27 @@ Whisper-1 has a hard **25 MB file size limit** and degrades above ~30 minutes of
 ```
 
 **Memory usage**: each chunk is read as a stream for upload; the merged segment array is the only in-memory structure. Peak RAM ≈ single chunk size (~15 MB WAV slice) + segment JSON.
+
+**API retry policy (v1.3.0)**:
+
+Each Whisper API call is wrapped in an exponential backoff retry loop. See §17.2 for full design.
+
+```
+Trigger conditions:
+  HTTP 429 (rate limit)
+  HTTP 500–599 (server error)
+  Network timeout (>30s no response)
+
+Retry schedule:
+  Attempt 1 → immediate
+  Attempt 2 → wait 2s
+  Attempt 3 → wait 4s
+  Attempt 4 → wait 8s   (4th = final)
+  After 4 attempts → throw; pipeline step marked 'error'
+
+Heartbeat: emits session:status { retryAttempt: N } so UI can display "Retrying…"
+Non-retryable errors: HTTP 400, 401, 413 (bad request, auth, file too large) → fail immediately
+```
 
 **Deduplication (v1.2.2 — optional guard)**:
 
@@ -323,7 +366,7 @@ This guard is triggered only when Whisper produces near-identical text within a 
 
 **Language hint**: `ja` / `en` / `vi` (multi → omit hint, auto-detect)
 
-### MediaService (new)
+### MediaService (updated v1.3.0 — watchdog)
 
 Wraps `ffmpeg` child process for audio extraction and conversion. Binary resolved at runtime from `ffmpeg-static` package path (see §12).
 
@@ -350,6 +393,8 @@ Errors:
 ```
 
 Progress is parsed from ffmpeg `time=HH:MM:SS.xx` stderr output and expressed as `(currentMs / totalMs) * 100`.
+
+**Child process watchdog (v1.3.0)**: See §17.3. If ffmpeg produces no stderr progress for 10 minutes, the watchdog kills the process and marks the step as error.
 
 ### LangDetectService (unchanged)
 ```
@@ -381,7 +426,7 @@ detectAll(segments[]):
 - Trigger: word count > 8 AND filler density > 15%
 - Batches up to 20 segments per GPT-4o-mini call, grouped by `detectedLang`
 
-### SummarizationService (updated — v1.2.0: hierarchical for long transcripts)
+### SummarizationService (updated — v1.3.0: prose-based pipeline)
 
 A full 2-hour meeting transcript can exceed 100k tokens — unsafe and costly to send to GPT-4o directly. SummarizationService uses a two-pass hierarchical strategy.
 
@@ -392,68 +437,77 @@ A full 2-hour meeting transcript can exceed 100k tokens — unsafe and costly to
 | Transcript tokens | Strategy |
 |-------------------|----------|
 | ≤ 12,000 | **Direct** — single GPT-4o call (existing behaviour) |
-| > 12,000 | **Hierarchical** — two-pass (see below) |
+| > 12,000 | **Hierarchical** — prose-based two-pass (see below) |
 
-**Hierarchical two-pass flow**:
+**Hierarchical prose pipeline (updated v1.3.0)**:
 
 ```
-Pass 1 — Chunk summarization (GPT-4o-mini, parallel-safe but run sequentially)
+Pass 1 — Chunk summarization (GPT-4o-mini, sequential)
   Split normalized transcript into blocks of ~8,000 tokens
   For each block:
-    Prompt: "Summarize this meeting segment. Extract: key points, decisions, action items."
-    Model: gpt-4o-mini, temperature: 0, max_tokens: 512
-    → ChunkSummary string
+    Prompt: "Summarize this meeting segment as concise prose.
+             Capture: key points, decisions made, action items, and any risks.
+             Preserve nuance — do not omit minority opinions or unresolved items."
+    Model: gpt-4o-mini, temperature: 0, max_tokens: 600
+    → ChunkSummary (free-form prose paragraph)
   Result: N × ChunkSummary (total tokens << original transcript)
 
-Pass 2 — Final structured minutes (GPT-4o)
-  Input: concatenated ChunkSummaries (typically 1,000–3,000 tokens total)
-  Prompt: "Based on these meeting summaries, produce the final structured minutes."
+[Reduction Pass — triggered only if concat(ChunkSummaries) > 12,000 tokens]
+  Prompt: "Compress the following meeting segment summaries into shorter prose.
+           Preserve all decisions, action items, and risks.
+           Do not impose structure — output as flowing paragraphs only."
+  Model: gpt-4o-mini, temperature: 0, max_tokens: 1200
+  → ReducedSummary (prose, ≤ 4,000 tokens)
+
+Pass 2 — Structured minutes (GPT-4o)
+  Input: ChunkSummaries or ReducedSummary (prose)
+  Prompt: "Based on these meeting summaries, extract the structured minutes.
+           Output strictly as JSON matching the provided schema."
   Model: gpt-4o, temperature: 0, max_tokens: 1024
   Response format: json_schema (strict mode — same schema as before)
   → MeetingMinutes JSON
 ```
 
+**Rationale for prose-based pipeline (v1.3.0)**:
+- Forcing bullet structure in the Reduction Pass caused GPT-4o to hallucinate omissions — items that did not fit the four-section format were silently dropped.
+- Prose summaries preserve meeting nuance and minority positions that bullets tend to flatten.
+- Structured extraction (decisions, todos, risks, next actions) happens only once, at the final GPT-4o pass, where the model has full schema context and output constraints.
+
+**API retry policy (v1.3.0)**: All GPT API calls in Pass 1, Reduction Pass, and Pass 2 use exponential backoff identical to BatchSttService. See §17.2.
+
 **Token budget per request**:
 
 | Call | Model | Input budget | Output budget |
 |------|-------|-------------|---------------|
-| Pass 1 chunk | gpt-4o-mini | 8,000 tokens | 512 tokens |
-| Pass 2 final | gpt-4o | ~3,000 tokens | 1,024 tokens |
+| Pass 1 chunk | gpt-4o-mini | 8,000 tokens | 600 tokens |
+| Reduction Pass | gpt-4o-mini | up to 12,000 tokens | 1,200 tokens |
+| Pass 2 final | gpt-4o | ~4,000 tokens | 1,024 tokens |
 
 **Cost control**:
 - Pass 1 uses gpt-4o-mini (10× cheaper than gpt-4o)
+- Reduction Pass uses gpt-4o-mini only when needed (> 12k combined summaries)
 - Only Pass 2 uses gpt-4o, with a small, bounded input
 
-**Reduction Pass (v1.2.1 — explicit design)**:
-
-Triggered when concatenated Pass 1 chunk summaries exceed 12,000 tokens (edge case: meetings > ~3 hours or unusually verbose summaries).
-
-```
-Reduction Pass — compress chunk summaries (GPT-4o-mini)
-  Input:  all N × ChunkSummary concatenated (> 12,000 tokens)
-  Prompt: "Compress the following meeting segment summaries into a
-           concise structured summary of <= 4,000 tokens.
-           Output as bullet lists with exactly these four sections:
-           ## Key Points
-           ## Decisions
-           ## Action Items
-           ## Risks / Concerns"
-  Model:  gpt-4o-mini, temperature: 0, max_tokens: 1200
-  → ReducedSummary (structured bullet list, <= 4,000 tokens)
-
-Pass 2 then uses ReducedSummary as input instead of raw chunk summaries.
-```
-
-The fixed output format (four labeled sections) ensures Pass 2 has consistent, structured context to generate `MeetingMinutes` JSON without information loss from unstructured compression.
-
 **Failure fallback**:
-- If any Pass 1 chunk fails: include raw (un-summarized) segment text for that block, continue
+- If any Pass 1 chunk fails after max retries: include raw (un-summarized) segment text for that block, continue
 - If Pass 2 fails: return empty MeetingMinutes with `purpose` = error message (same as before)
 - Partial results are still saved to `minutes.json`; UI indicates degraded quality
 
 **JSON schema** (unchanged): `purpose`, `decisions[]`, `todos[]`, `concerns[]`, `next_actions[]`
 
 **Model**: gpt-4o for Pass 2, `temperature: 0`, response format: `json_schema` strict
+
+**Pass summary chain**:
+
+```
+Long transcript:   Chunks → [Pass 1: prose summaries]
+                                          ↓ (if > 12k tokens)
+                                    [Reduction Pass: prose compression]
+                                          ↓
+                              [Pass 2 GPT-4o: JSON extraction] → MeetingMinutes
+
+Short transcript:  Direct → [Pass 2 GPT-4o: JSON extraction] → MeetingMinutes
+```
 
 ### PostMeetingService (updated)
 
@@ -465,7 +519,35 @@ postMeetingService.run(sessionId, opts?: { audioPath?: string })
   All 5 pipeline steps unchanged
   Each step prefixed by checkpoint write, suffixed by checkpoint update
   Emits session:status per step
+  Each API-calling step wrapped in exponential backoff retry (§17.2)
 ```
+
+### AutoCleanupService (new — v1.3.0)
+
+Runs on app startup. Scans all sessions older than `StorageSettings.autoCleanupDays`.
+
+```
+autoCleanupService.run(dryRun?: boolean): CleanupReport
+  for each session where:
+    session.status === 'done'
+    AND (now - session.createdAt) > autoCleanupDays * 86_400_000ms
+
+  Delete derived files:
+    audio.wav          (large — typically 50–200 MB for 1–2h import)
+    chunks/            (transient, should already be gone after pipeline)
+    transcript.jsonl   (recoverable from audio if needed)
+    normalized.json    (recoverable from transcript)
+
+  Keep:
+    minutes.json       (primary user value — kept always)
+    export.md          (primary user value — kept always)
+    source/            (archived source file — only if copySourceFile was true)
+    audio.pcm          (realtime raw capture — optional, see StorageSettings.fullPurge)
+
+CleanupReport: { scannedCount, cleanedCount, freedBytes, errors[] }
+```
+
+If `autoCleanupDays = 0`, auto-cleanup is disabled. The user can also trigger cleanup manually via Settings. See §17.1 for full design.
 
 ### ExportService (unchanged)
 Deterministic Markdown render (no LLM).
@@ -474,30 +556,33 @@ Deterministic Markdown render (no LLM).
 
 ## 6. Data Storage
 
-All data stored at `%APPDATA%/mtg-assistant/` (Windows) or `~/Library/Application Support/mtg-assistant/` (macOS).
+All **metadata** stored at `%APPDATA%/mtg-assistant/` (Windows) or `~/Library/Application Support/mtg-assistant/` (macOS). **Session data** stored under `{storageRoot}/sessions/` which defaults to the same path but is user-configurable.
 
 ```
-mtg-assistant/
-├── settings.json             # AppSettings (device IDs, UI lang, whisper hint)
-├── vault.enc                 # ← v1.2: encrypted fallback key store (AES-256-GCM)
-├── app.json                  # Session index (SessionMeta[])
-├── logs/                     # ← NEW v1.2
-│   └── app.log               # Structured log, rotated at 5 MB
-└── sessions/
-    └── {uuid}/
-        ├── source/           # Import only
-        │   └── {originalFilename}   # copied verbatim from user's path
-        ├── chunks/           # ← NEW v1.2 — transient, deleted after merge
-        │   ├── chunk_000.wav
-        │   └── chunk_001.wav ...
-        ├── audio.pcm         # Realtime: Raw PCM16 16kHz mono
-        ├── audio.wav         # Import: 16kHz mono WAV from ffmpeg
-        ├── pipeline.json     # Pipeline checkpoint (atomic write)
-        ├── transcript.jsonl  # TranscriptSegment[] (one JSON per line)
-        ├── normalized.json   # NormalizedSegment[]
-        ├── minutes.json      # MeetingMinutes (structured)
-        └── export.md         # Markdown export
+userData/                             ← always at %APPDATA%/mtg-assistant/
+├── settings.json                     # AppSettings (device IDs, UI lang, storageRoot, etc.)
+├── vault.enc                         # Encrypted fallback key store (AES-256-GCM)
+├── app.json                          # Session index (SessionMeta[])
+└── logs/
+    └── app.log                       # Structured log, rotated at 5 MB
+
+{storageRoot}/sessions/               ← configurable (default = userData)
+└── {uuid}/
+    ├── source/                       # Import only — present if copySourceFile=true
+    │   └── {originalFilename}        # Archived copy of source file
+    ├── chunks/                       # Transient — deleted after merge
+    │   ├── chunk_000.wav
+    │   └── chunk_001.wav ...
+    ├── audio.pcm                     # Realtime: Raw PCM16 16kHz mono
+    ├── audio.wav                     # Import: 16kHz mono WAV from ffmpeg
+    ├── pipeline.json                 # Pipeline checkpoint (atomic write)
+    ├── transcript.jsonl              # TranscriptSegment[] (one JSON per line)
+    ├── normalized.json               # NormalizedSegment[]
+    ├── minutes.json                  # MeetingMinutes (structured) ← kept by cleanup
+    └── export.md                     # Markdown export              ← kept by cleanup
 ```
+
+**Storage location rationale**: Metadata files (`app.json`, `settings.json`, `vault.enc`, `logs/`) are small (< 10 MB total) and always remain in `userData` for reliable access. Session audio and transcript files are large (tens to hundreds of MB per session) and live under `storageRoot` which the user can redirect to an external drive or NAS. See §17.1.
 
 **`vault.json` → `vault.enc` migration** (v1.2.0): Primary key storage moves to OS keychain via `keytar`. `vault.enc` is the encrypted fallback for environments where keytar is unavailable (rare). See §16.4 for full security design.
 
@@ -533,18 +618,23 @@ Changes to `shared/types.ts` (diff-friendly — only additions shown):
 ```typescript
 // ── Existing (unchanged) ────────────────────────────────────────────
 type LangCode = 'ja' | 'vi' | 'en' | 'multi' | 'none';
-type SessionStatus = 'recording' | 'processing' | 'done' | 'error';
+type SessionStatus = 'recording' | 'processing' | 'done' | 'error' | 'error_recoverable';
 
-// ── Updated SessionMeta ─────────────────────────────────────────────
+// ── Updated SessionMeta (v1.3.0 additions) ──────────────────────────
 interface SessionMeta {
   id: string; title: string; lang: LangCode; targetLang: LangCode;
-  createdAt: number; status: SessionStatus; durationMs?: number;
+  createdAt: number; status: SessionStatus;
 
-  // NEW fields (v1.1.0)
-  inputType:      'realtime' | 'import';
-  sourceFileName?: string;          // original filename for import sessions
-  durationMs?:    number;           // total audio duration in ms
-  audioFormat?:   'pcm' | 'wav';    // which audio file is present
+  // v1.1.0 fields
+  inputType:            'realtime' | 'import';
+  sourceFileName?:      string;             // original filename (display only)
+  durationMs?:          number;             // total audio duration in ms
+  audioFormat?:         'pcm' | 'wav';      // which audio file is present
+
+  // v1.3.0 fields ← NEW
+  sourceAbsolutePath?:  string;             // original file path on user's filesystem
+  sourceArchivedPath?:  string;             // path inside sessions/{id}/source/ if copied
+  diskUsageBytes?:      number;             // estimated size of all session files (cached)
 }
 
 // ── New: Import payload ─────────────────────────────────────────────
@@ -552,8 +642,8 @@ interface ImportPayload {
   title:       string;
   sourcePath:  string;              // absolute path on user's filesystem
   sourceType:  'audio' | 'video';
-  lang?:       LangCode;            // if omitted → auto-detect
-  targetLang?: LangCode;            // if omitted → no translation
+  lang?:       LangCode;
+  targetLang?: LangCode;
 }
 
 // ── New: MediaProbeResult ───────────────────────────────────────────
@@ -561,15 +651,15 @@ interface MediaProbeResult {
   durationMs:  number;
   hasAudio:    boolean;
   hasVideo:    boolean;
-  format:      string;              // e.g. 'mov,mp4,m4a,3gp,3g2,mj2'
-  audioCodec?: string;              // e.g. 'aac', 'mp3', 'pcm_s16le'
+  format:      string;
+  audioCodec?: string;
   sampleRate?: number;
   channels?:   number;
 }
 
 // ── New: Pipeline checkpoint ────────────────────────────────────────
 type PipelineStep =
-  | 'prepare_audio'   // import only
+  | 'prepare_audio'
   | 'batch_stt'
   | 'lang_detect'
   | 'normalizing'
@@ -586,11 +676,46 @@ interface PipelineState {
   updatedAt:       number;
 }
 
+// ── New: Storage settings (v1.3.0) ──────────────────────────────────
+interface StorageSettings {
+  storageRootPath:      string;    // default = app.getPath('userData')
+  allowExternalStorage: boolean;   // if false, warn on non-userData paths
+  autoCleanupDays:      number;    // 0 = disabled; default 30
+  copySourceFile:       boolean;   // archive source file locally; default false
+}
+
+// ── New: Storage stats (v1.3.0) ─────────────────────────────────────
+interface StorageStats {
+  storageRootPath:    string;
+  totalSessions:      number;
+  totalDiskBytes:     number;     // sum of all session file sizes
+  freeBytesOnVolume:  number;     // free space on the volume containing storageRoot
+  perSession:         Array<{ sessionId: string; bytes: number; title: string }>;
+}
+
+// ── New: Cleanup report (v1.3.0) ─────────────────────────────────────
+interface CleanupReport {
+  scannedCount: number;
+  cleanedCount: number;
+  freedBytes:   number;
+  errors:       Array<{ sessionId: string; message: string }>;
+  dryRun:       boolean;
+}
+
+// ── Updated AppSettings ──────────────────────────────────────────────
+interface AppSettings {
+  // existing fields...
+  inputDeviceId?:   string;
+  uiLang:           'ja' | 'en' | 'vi';
+  whisperLangHint?: LangCode;
+  // v1.3.0 additions:
+  storage:          StorageSettings;
+}
+
 // ── Existing (unchanged) ────────────────────────────────────────────
 interface TranscriptSegment { /* ... */ }
 interface NormalizedSegment { /* ... */ }
 interface MeetingMinutes    { /* ... */ }
-interface AppSettings       { /* ... */ }
 ```
 
 ---
@@ -600,96 +725,82 @@ interface AppSettings       { /* ... */ }
 ### Routes
 
 ```
-/                     → Dashboard      (session list + Import button)   ← updated
+/                     → Dashboard      (session list + Import button)
 /session/setup        → SessionSetup   (new realtime meeting form)
-/session/import       → ImportScreen   (new: file picker + metadata)    ← NEW
+/session/import       → ImportScreen   (file picker + metadata)
 /session/:id/live     → LiveSession    (recording view)
-/session/:id          → PostMeeting    (results + progress + retry)     ← updated
-/settings             → Settings       (API keys + prefs)
+/session/:id          → PostMeeting    (results + progress + retry)
+/settings             → Settings       (API keys + prefs + storage)  ← updated v1.3
 ```
 
-### Dashboard (updated)
+### Dashboard (updated v1.3.0 — disk warning banner)
 
-Add an **Import** button next to the existing "New Meeting" button:
-
-```
-┌─────────────────────────────────────────────┐
-│ 会議履歴 / Meeting History                   │
-│                            [+ 新規録音] [インポート] │
-│ ─────────────────────────────────────────── │
-│  Session card 1  ...                         │
-│  Session card 2  ...                         │
-└─────────────────────────────────────────────┘
-```
-
-Clicking "インポート / Import / Nhập" navigates to `/session/import`.
-
-### ImportScreen (new — `/session/import`)
-
-Single-page form, no modal. Layout:
+When `storage:warning` IPC push is received (free space < 5 GB on `storageRoot` volume):
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  ← Back   インポート / Import Audio or Video         │
-│ ─────────────────────────────────────────────────── │
-│  ファイル選択                                         │
-│  [_____ path/to/file.mp4 ______________________] [選択]│
-│  Duration: 32:14  |  Format: mp4  |  Audio: ✓        │
-│                                                      │
-│  タイトル  [_________________________]               │
-│                                                      │
-│  言語       [自動検出 ▼]                              │
-│  翻訳先     [なし ▼]                                 │
-│                                                      │
-│              [キャンセル]  [インポート開始]            │
-└──────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│ ⚠ ストレージの空き容量が少なくなっています (残 3.2 GB)             │
+│   設定でストレージ先を変更するか、古いセッションを削除してください。 │
+│                                              [設定を開く] [閉じる]│
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-Behaviour:
-- File selection via `dialog.showOpenDialog` (IPC invoke or Electron dialog) filtered to `['*.wav','*.mp3','*.m4a','*.mp4','*.mov']`
-- After file chosen: calls `media:probe` IPC to show duration and validate audio presence
-- If `hasAudio === false`: shows inline error, disables Import button
-- "Import" button → `session:import` invoke → navigate to `/session/:id` (PostMeeting)
+### ImportScreen (unchanged from v1.1.0)
 
-### PostMeeting (updated)
+### PostMeeting (updated — retry banner extended for backoff)
 
-Existing tabs (Overview / Transcript / Minutes / Todos) remain unchanged.
-
-**Progress panel** — shown when `status === 'processing'`:
+**Processing with retry** — shown when `session:status` includes `retryAttempt`:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  処理中 / Processing...                              │
 │  ─────────────────────────────────────────────────  │
 │  ✓  prepare_audio   完了                             │
-│  ✓  batch_stt       完了                             │
-│  ⟳  normalizing     実行中  ████████░░░░  65%        │
+│  ⟳  batch_stt       再試行中 (2/4) … 4秒後に再開    │
+│  ○  normalizing     待機中                           │
 │  ○  summarizing     待機中                           │
 │  ○  exporting       待機中                           │
-│                                                      │
-│  [処理を中断]                                        │
 └─────────────────────────────────────────────────────┘
 ```
 
-**Error state** — shown when `status === 'error'`:
+**Error state**, **Resume banner**: unchanged from v1.2.0.
+
+### Settings (updated v1.3.0 — Storage section)
+
+New **Storage** section added below API Keys:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  ⚠ エラー / Error                                   │
-│  normalizing ステップで失敗しました                   │
-│  Error: OpenAI rate limit exceeded                   │
-│  ─────────────────────────────────────────────────  │
-│  ✓  prepare_audio   完了                             │
-│  ✓  batch_stt       完了                             │
-│  ✗  normalizing     失敗  ←─ retry from here         │
-│  ○  summarizing     待機中                           │
-│  ○  exporting       待機中                           │
-│                                                      │
-│          [normalizing から再試行]                     │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  ストレージ設定 / Storage Settings                            │
+│  ─────────────────────────────────────────────────────────── │
+│  保存先フォルダ                                               │
+│  [C:\Users\...\AppData\Roaming\mtg-assistant _______] [変更] │
+│  空き容量: 42.3 GB                                           │
+│                                                              │
+│  ☐ ソースファイルをローカルにアーカイブする                     │
+│     (有効にすると元ファイルを削除しても再処理できます)           │
+│                                                              │
+│  古いファイルの自動削除: [30] 日後  (0 = 無効)                │
+│     削除対象: audio.wav, chunks/, transcript, normalized      │
+│     保持: minutes.json, export.md                            │
+│                                                              │
+│  使用容量: 2.4 GB (12 sessions)         [今すぐクリーンアップ] │
+│  ─────────────────────────────────────────────────────────── │
+│  [セッション別の使用容量を表示]                                 │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Retry button calls `session:retryStep` IPC with `{ sessionId, step: 'normalizing' }`.
+**Storage per-session breakdown** (expandable panel):
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  セッション別ストレージ                                        │
+│  ─────────────────────────────────────────────────────────  │
+│  プロダクトレビュー (2026-03-01)       1.2 GB  [削除]        │
+│  チームスタンドアップ (2026-02-28)       82 MB  [削除]        │
+│  …                                                           │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -700,11 +811,14 @@ Retry button calls `session:retryStep` IPC with `{ sessionId, step: 'normalizing
 | ffmpeg binary not found | Error code `FFMPEG_MISSING` → toast: "ffmpeg が見つかりません。アプリを再インストールしてください。" + link to docs |
 | Video file has no audio stream | Error code `NO_AUDIO_STREAM` → shown in ImportScreen inline (probe response `hasAudio: false`) before import starts |
 | Unsupported file format | File dialog filter prevents selection; if bypassed, ffprobe returns error → shown on probe |
-| Whisper API failure | Pipeline pauses at `batch_stt`, writes error to `pipeline.json`, emits `session:status` with `status:'error'` → retry button in PostMeeting |
-| GPT rate limit / timeout | Same pattern for `normalizing` and `summarizing` steps |
-| Import of long audio (WAV > 24 MB after conversion) | `BatchSttService` checks `wavFileSizeBytes` after MediaService conversion; if > 24 MB, splits into 15-min chunks (no overlap) via ffmpeg segment muxer, transcribes each sequentially, applies optional text-similarity dedup guard (≥ 0.95), merges with offset-adjusted `TranscriptSegment[]` |
+| Whisper API failure (persistent) | After 4 retry attempts with backoff: pipeline pauses at `batch_stt`, writes error to `pipeline.json`, emits `session:status` with `status:'error'` → retry button in PostMeeting |
+| GPT rate limit / timeout | Same retry + backoff pattern for `normalizing` and `summarizing` steps |
+| Import of long audio (WAV > 24 MB after conversion) | `BatchSttService` checks `wavFileSizeBytes` post-conversion; chunk mode triggered; all segments merged with correct offsets; dedup guard runs (no-op in normal case); timestamps correct |
 | App crash mid-ffmpeg | ffmpeg child process dies with app; `pipeline.json` will still show `prepare_audio: pending` → recoverable on restart |
 | Disk full during conversion | ffmpeg exits non-zero; caught → `FfmpegError` → error state in PostMeeting |
+| Source file moved (no-copy mode) | `prepare_audio` fails: `sourceAbsolutePath` not found → error shown with path + option to re-import from new location |
+| storageRoot volume < 5 GB free | `storage:warning` push → dismissible banner in Dashboard + Dashboard metric; import blocked if < 500 MB free |
+| PipelineLock timeout (ffmpeg hang) | Watchdog kills child process after 10 min no progress → lock released → step marked 'error' |
 
 ---
 
@@ -725,6 +839,8 @@ Retry button calls `session:retryStep` IPC with `{ sessionId, step: 'normalizing
        mark status = 'error_recoverable'
        error = 'App closed during pipeline step: {step}'
 3. sessionStore.save()
+4. autoCleanupService.run()    ← NEW v1.3 — runs after recovery scan
+5. diskMonitor.start()         ← NEW v1.3 — periodic free-space check
 ```
 
 ### SessionStatus update
@@ -766,14 +882,15 @@ Validation failures are logged at `warn` level with the session ID and step name
 ```
 electron/services/
 ├── stt.service.ts              Deepgram realtime WebSocket (unchanged)
-├── batch-stt.service.ts        Whisper batch — accepts wavPath  ← updated
+├── batch-stt.service.ts        Whisper batch + retry policy  ← updated v1.3
 ├── lang-detect.service.ts      Unicode heuristic (unchanged)
 ├── translation.service.ts      DeepL + GPT router (unchanged)
 ├── normalization.service.ts    Rule + LLM normalization (unchanged)
-├── summarization.service.ts    GPT-4o minutes (unchanged)
-├── post-meeting.service.ts     Pipeline orchestrator  ← updated (checkpoint)
+├── summarization.service.ts    GPT-4o minutes — prose pipeline  ← updated v1.3
+├── post-meeting.service.ts     Pipeline orchestrator  ← updated (checkpoint + retry)
 ├── export.service.ts           Markdown renderer (unchanged)
-└── media.service.ts            ffmpeg wrapper  ← NEW
+├── media.service.ts            ffmpeg/ffprobe wrapper + watchdog  ← updated v1.3
+└── auto-cleanup.service.ts     Derived file cleanup  ← NEW v1.3
 ```
 
 ---
@@ -816,6 +933,8 @@ At runtime in the packaged app, the path is resolved relative to `process.resour
 
 **Licensing note**: The `ffmpeg-static` binary is built with LGPL configuration by default (no GPL codecs). This is sufficient for the input formats supported (wav, mp3, m4a, mp4, mov). If additional codec support is required in future (e.g., WMV), a GPL build would be needed and must be disclosed to end users. See [ffmpeg.org/legal.html](https://ffmpeg.org/legal.html).
 
+**Code-signing requirement (v1.3.0)**: Both the Electron app executable and the ffmpeg/ffprobe binaries must be code-signed in production builds. See §17.5 for the full CI/CD code-signing design.
+
 ### Build Output (updated)
 
 ```
@@ -824,8 +943,8 @@ out/
 ├── preload/index.js      # Context bridge
 ├── renderer/             # Vite built React app
 └── resources/
-    └── ffmpeg(.exe)      # Unpacked from asar
-    └── ffprobe(.exe)
+    └── ffmpeg(.exe)      # Unpacked from asar — must be code-signed
+    └── ffprobe(.exe)     # Unpacked from asar — must be code-signed
 ```
 
 ---
@@ -834,45 +953,52 @@ out/
 
 ```
 electron/
-├── main.ts                        App entry, BrowserWindow, startup recovery scan
+├── main.ts                        App entry, BrowserWindow, startup recovery + cleanup
 ├── preload.ts                     window.api context bridge
 ├── ipc/
 │   ├── session.ipc.ts             Session lifecycle handlers (unchanged)
-│   ├── session.import.ipc.ts      Import session handler  ← NEW
+│   ├── session.import.ipc.ts      Import session handler
 │   ├── audio.ipc.ts               PCM chunk receiver (unchanged)
 │   ├── settings.ipc.ts            Settings + API key CRUD (unchanged)
+│   ├── storage.ipc.ts             Storage stats, set root, cleanup  ← NEW v1.3
 │   └── export.ipc.ts              Markdown export trigger (unchanged)
 ├── services/
 │   ├── stt.service.ts             Deepgram realtime WebSocket
-│   ├── batch-stt.service.ts       Whisper batch transcription  ← updated
+│   ├── batch-stt.service.ts       Whisper batch + retry policy  ← updated v1.3
 │   ├── lang-detect.service.ts     Unicode heuristic lang detection
 │   ├── translation.service.ts     DeepL + GPT translation router
 │   ├── normalization.service.ts   Rule + LLM text normalization
-│   ├── summarization.service.ts   GPT-4o minutes generation
+│   ├── summarization.service.ts   GPT-4o minutes — prose pipeline  ← updated v1.3
 │   ├── post-meeting.service.ts    Pipeline orchestrator  ← updated
 │   ├── export.service.ts          Markdown renderer
-│   └── media.service.ts           ffmpeg/ffprobe wrapper  ← NEW
+│   ├── media.service.ts           ffmpeg/ffprobe wrapper + watchdog  ← updated v1.3
+│   └── auto-cleanup.service.ts    Derived file cleanup  ← NEW v1.3
 ├── store/
 │   ├── session.store.ts           Session index (app.json)  ← updated types
-│   ├── file.store.ts              Per-session file ops  ← updated
+│   ├── file.store.ts              Per-session file ops  ← updated (storageRoot)
 │   └── secret.store.ts            API key vault (unchanged)
-└── utils/paths.ts                 userData path helpers
+└── utils/
+    ├── paths.ts                   userData + storageRoot path helpers  ← updated
+    ├── logger.ts                  Structured NDJSON logger (unchanged)
+    ├── disk-monitor.ts            Free-space poller  ← NEW v1.3
+    └── retry.ts                   Exponential backoff helper  ← NEW v1.3
 
 renderer/src/
 ├── App.tsx                        React Router setup
 ├── main.tsx                       Entry point
 ├── screens/
-│   ├── Dashboard.tsx              ← updated (Import button)
+│   ├── Dashboard.tsx              ← updated (disk warning banner)
 │   ├── SessionSetup.tsx           (unchanged)
-│   ├── ImportScreen.tsx           File picker + metadata form  ← NEW
+│   ├── ImportScreen.tsx           File picker + metadata form
 │   ├── LiveSession.tsx            (unchanged)
-│   ├── PostMeeting.tsx            ← updated (progress panel + retry)
-│   └── Settings.tsx               (unchanged)
+│   ├── PostMeeting.tsx            ← updated (retry progress display)
+│   └── Settings.tsx               ← updated (storage section)
 ├── components/
 │   ├── Layout.tsx                 Sidebar + nav (unchanged)
-│   ├── SessionCard.tsx            Session list item (unchanged)
-│   ├── StatusBadge.tsx            ← may need 'error_recoverable' style
-│   └── PipelineProgress.tsx       Step-by-step progress UI  ← NEW
+│   ├── SessionCard.tsx            ← updated (diskUsageBytes display)
+│   ├── StatusBadge.tsx            (unchanged)
+│   ├── PipelineProgress.tsx       ← updated (retryAttempt display)
+│   └── StorageStats.tsx           Per-session disk usage panel  ← NEW v1.3
 ├── hooks/
 │   ├── useIpc.ts                  IPC event subscriptions
 │   └── useAudioCapture.ts         AudioWorklet + AGC (unchanged)
@@ -881,10 +1007,10 @@ renderer/src/
 │   └── captionStore.ts            (unchanged)
 └── i18n/
     ├── index.tsx                  I18nProvider + useT()
-    └── locales.ts                 ← updated (new import-mode strings)
+    └── locales.ts                 ← updated (storage + retry strings)
 
 shared/
-└── types.ts                       ← updated (ImportPayload, PipelineState, MediaProbeResult)
+└── types.ts                       ← updated (StorageSettings, StorageStats, CleanupReport)
 ```
 
 ---
@@ -909,7 +1035,7 @@ Dark theme defined in `tailwind.config.js`:
 
 ## 15. Implementation Checklist (File-level Plan)
 
-Step-by-step plan to implement Import mode without breaking realtime.
+Step-by-step plan to implement Import mode without breaking realtime. (v1.1.0 plan — unchanged. See §17 for v1.3.0 additions.)
 
 ---
 
@@ -1009,7 +1135,7 @@ Step-by-step plan to implement Import mode without breaking realtime.
 ```
 handleImport(payload: ImportPayload): Promise<{ sessionId }>
   1. sessionStore.create({ ...meta, inputType:'import', status:'processing' })
-  2. fileStore.copySource(sessionId, sourcePath)
+  2. fileStore.copySource(sessionId, sourcePath)  [if copySourceFile=true]
   3. Run media conversion (MediaService)
   4. Kick off postMeetingService.run(sessionId) — async, do NOT await in handler
   5. Return { sessionId } immediately so renderer can navigate
@@ -1231,12 +1357,17 @@ ffprobePath = path.join(base, 'node_modules/ffprobe-static/...')
 | F2 | Import MP4 ~30 min with audio | Audio extracted, same pipeline, correct duration in SessionMeta |
 | F3 | Import MP4 with no audio stream | `probe` returns `hasAudio: false`, Import button disabled, no session created |
 | F4 | Import audio file where converted WAV > 24 MB (e.g., 2h MP3 → ~110 MB WAV) | `BatchSttService` checks `wavFileSizeBytes` post-conversion; chunk mode triggered; all segments merged with correct offsets; dedup guard runs (no-op in normal case); timestamps correct |
-| F5 | Whisper API failure (network off) | Status = error at `batch_stt`, retry button shown, retry succeeds when network restored |
+| F5 | Whisper API failure (network off) | Retry with backoff (4 attempts); after max attempts: status = error at `batch_stt`, retry button shown |
 | F6 | App crash during `normalizing` | Relaunch: session shows `error_recoverable`, resume from `normalizing`, skips `batch_stt`/`lang_detect` |
 | F7 | App crash during `prepare_audio` (ffmpeg running) | Relaunch: `audio.wav` absent or partial (tmp not renamed), session marked `error_recoverable` with message "re-import required" |
 | F8 | Realtime recording (full flow) | Unchanged behavior — no regression |
 | F9 | Realtime session + navigate away + return | REC badge persists, audio uninterrupted |
 | F10 | Unsupported file extension bypassed | ffprobe returns codec error → error toast in ImportScreen |
+| F11 | Import with `copySourceFile = false`, then original file moved | `prepare_audio` fails with path-not-found error; session shows re-import message |
+| F12 | storageRoot volume drops below 5 GB | Dashboard warning banner appears; import blocked below 500 MB |
+| F13 | Whisper returns 429, then succeeds on retry | `retryAttempt: 2` shown in progress panel; step completes; no pipeline error |
+| F14 | ffmpeg hangs (no stderr for 10 min) | Watchdog kills process; PipelineLock released; step marked error; session recoverable |
+| F15 | Auto-cleanup on startup (30-day-old done sessions) | `audio.wav` and derived files deleted; `minutes.json` and `export.md` preserved |
 
 ---
 
@@ -1249,6 +1380,9 @@ ffprobePath = path.join(base, 'node_modules/ffprobe-static/...')
 | R3 | **Pipeline checkpoint corruption** (crash during write) | Low | Medium | Atomic write (`.tmp` → rename); if `.tmp` exists on startup, discard it |
 | R4 | **Race condition**: user navigates to PostMeeting before `session:import` responds | Low | Low | `session:import` returns `sessionId` before async processing starts; navigator uses that ID; PostMeeting subscribes to `session:status` |
 | R5 | **macOS audio permission for `getDisplayMedia`** (existing concern, not new) | Medium | Medium | Already handled in realtime; import mode bypasses this entirely (file-based) |
+| R6 | **External storageRoot unavailable** (network drive disconnected) | Medium | High | Validate path on startup; show error if `storageRoot` inaccessible; fall back to userData with warning |
+| R7 | **Source file deleted before retry** (no-copy mode) | Medium | Medium | Clear error message on `prepare_audio` failure; offer re-import from new path |
+| R8 | **PipelineLock deadlock** (ffmpeg or Deepgram hang) | Low | High | 2h lock timeout + 10min watchdog; see §17.3 |
 
 ---
 
@@ -1359,8 +1493,8 @@ Duration (from `MediaService.probe()`) is stored in `SessionMeta.durationMs` for
 #### Chunk storage lifecycle
 
 ```
-sessions/{id}/chunks/    ← created before chunking starts
-    chunk_000.wav        ← 15-min slice
+{storageRoot}/sessions/{id}/chunks/    ← created before chunking starts
+    chunk_000.wav                      ← 15-min slice
     chunk_001.wav
     ...
 ```
@@ -1410,11 +1544,11 @@ Only near-exact text matches within a 3-second window are removed. This path is 
 
 ---
 
-### 16.3 Hierarchical Summarization
+### 16.3 Hierarchical Summarization (updated v1.3.0 — prose pipeline)
 
-See the updated SummarizationService in §5 for full design. This section documents cost governance specifics and the Reduction Pass.
+See the updated SummarizationService in §5 for full design. This section documents cost governance specifics and the updated Reduction Pass.
 
-#### Reduction Pass design (v1.2.1)
+#### Reduction Pass design (updated v1.3.0 — prose compression)
 
 Triggered when concatenated Pass 1 chunk summaries exceed 12,000 tokens:
 
@@ -1422,34 +1556,31 @@ Triggered when concatenated Pass 1 chunk summaries exceed 12,000 tokens:
 Trigger check:
   estimateTokens(allChunkSummaries.join('\n\n')) > 12_000
 
-Reduction Pass — GPT-4o-mini compression
+Reduction Pass — GPT-4o-mini prose compression
   Input:  all N × ChunkSummary strings concatenated (> 12,000 tokens)
-  Prompt: "Compress the following meeting segment summaries into a
-           concise structured summary of no more than 4,000 tokens.
-           Output only these four labeled sections as bullet lists:
-           ## Key Points
-           ## Decisions
-           ## Action Items
-           ## Risks / Concerns
-           Do not add any other sections or commentary."
+  Prompt: "Compress the following meeting segment summaries into shorter prose.
+           Preserve all decisions, action items, and risks.
+           Output as flowing paragraphs — do not use bullet lists or impose structure."
   Model:  gpt-4o-mini, temperature: 0, max_tokens: 1200
-  → ReducedSummary  (structured bullet list, ≤ 4,000 tokens)
+  → ReducedSummary (prose, ≤ 4,000 tokens)
 
 Pass 2 receives ReducedSummary instead of raw chunk summaries.
 ```
 
-The fixed four-section output format ensures Pass 2 (GPT-4o) has structured, bounded context. Unstructured compression is avoided because it causes GPT-4o to miss action items or merge unrelated decisions.
+**Rationale for prose-only Reduction Pass (v1.3.0)**:
+
+The v1.2.1 design forced a four-section bullet output (`## Key Points / ## Decisions / ## Action Items / ## Risks`). In practice this caused GPT-4o-mini to silently drop items that did not fit neatly into one section, resulting in information loss before Pass 2 (GPT-4o) could see them. By keeping Reduction Pass output as flowing prose, nuance and minority positions are preserved. Pass 2 (GPT-4o with strict JSON schema) is the single point of structured extraction.
 
 **Pass summary chain**:
 
 ```
-Long transcript:   Chunks → [Pass 1] → ChunkSummaries
+Long transcript:   Chunks → [Pass 1: prose summaries per chunk]
                                           ↓ (if > 12k tokens)
-                                       [Reduction Pass] → ReducedSummary
+                                    [Reduction Pass: prose compression]
                                           ↓
-                              [Pass 2 GPT-4o] → MeetingMinutes JSON
+                              [Pass 2 GPT-4o: JSON extraction] → MeetingMinutes
 
-Short transcript:  Direct → [Pass 2 GPT-4o] → MeetingMinutes JSON
+Short transcript:  Direct → [Pass 2 GPT-4o: JSON extraction] → MeetingMinutes
 ```
 
 #### Token estimation (pre-summarization)
@@ -1468,16 +1599,17 @@ estimateTokens(segments: NormalizedSegment[]): number
 
 If `estimateTokens(segments) > 12_000` → hierarchical path.
 
-#### Cost estimate per 1-hour meeting
+#### Cost estimate per meeting
 
-| Step | Model | Estimated tokens | Cost (approx) |
-|------|-------|-----------------|---------------|
-| Normalization (Phase 2, if triggered) | gpt-4o-mini | ~10k in + 10k out | ~$0.01 |
-| Summarization Pass 1 (4 chunks × 8k) | gpt-4o-mini | ~32k in + 2k out | ~$0.02 |
-| Summarization Pass 2 | gpt-4o | ~2k in + 1k out | ~$0.04 |
-| **Total per 1h meeting** | | | **~$0.07** |
+| Meeting length | Whisper (STT) | GPT-4o-mini (norm+pass1) | GPT-4o (pass2) | Total |
+|---------------|---------------|--------------------------|-----------------|-------|
+| 30 min | ~$0.18 | ~$0.01 | ~$0.04 | **~$0.23** |
+| 1 hour | ~$0.36 | ~$0.02 | ~$0.04 | **~$0.42** |
+| 2 hours | ~$0.72 | ~$0.04 | ~$0.04 | **~$0.80** |
 
-Costs are indicative at March 2026 pricing. 2-hour meeting roughly doubles Pass 1 cost.
+Assumptions: Whisper at $0.006/min; gpt-4o-mini at $0.15/1M in + $0.60/1M out; gpt-4o at $5/1M in + $15/1M out. Prices indicative at March 2026.
+
+Note: DeepL cost (realtime translation, if enabled) is separate and not included above.
 
 #### Guardrails
 
@@ -1485,7 +1617,7 @@ Costs are indicative at March 2026 pricing. 2-hour meeting roughly doubles Pass 
 |-------|-----------|--------|
 | Max transcript length | 200,000 characters | Truncate to first 200k, log warning, note in minutes |
 | Max GPT tokens per request | 8,000 input / 1,024 output | Enforced by chunk size; overflow → reduce chunk size |
-| Cost warning | > 5 chunks in Pass 1 | Log cost estimate to `app.log`, emit `session:status` with warning field |
+| Cost warning | > 5 chunks in Pass 1 | Log cost estimate to `app.log`, emit `session:status` with `warning: 'HIGH_COST_EXPECTED'` |
 | Normalization Phase 2 gate | Only if filler density > 15% | Prevents unnecessary LLM calls for clean audio |
 
 ---
@@ -1559,9 +1691,9 @@ if vault.json exists:
 
 ---
 
-### 16.5 Concurrency Guard
+### 16.5 Concurrency Guard (updated v1.3.0 — deadlock prevention)
 
-Only one active pipeline is allowed at a time. Enforced in-memory (fast path) and via persisted flag in `app.json` (recovery path).
+Only one active pipeline is allowed at a time. Enforced in-memory (fast path) and via persisted flag in `app.json` (recovery path). v1.3.0 adds lock timeout and heartbeat watchdog to prevent deadlock from hung child processes.
 
 #### Rules
 
@@ -1573,28 +1705,84 @@ Only one active pipeline is allowed at a time. Enforced in-memory (fast path) an
 | Start import | Another session `status='processing'` | Blocked — toast error |
 | Resume pipeline | Another pipeline running in memory | Queued until running pipeline completes |
 
-#### In-memory lock
+#### In-memory lock (updated v1.3.0)
 
 ```
 // electron/services/pipeline-lock.ts
 class PipelineLock {
   private activeSessionId: string | null = null;
+  private acquiredAt:      number | null = null;
+  private lastHeartbeat:   number | null = null;
+  private readonly LOCK_TIMEOUT_MS      = 2 * 60 * 60 * 1000;  // 2 hours
+  private readonly HEARTBEAT_TIMEOUT_MS = 10 * 60 * 1000;       // 10 minutes
 
   acquire(sessionId: string): boolean
-    if activeSessionId !== null: return false
-    activeSessionId = sessionId; return true
+    if activeSessionId !== null AND !this.isExpired(): return false
+    if activeSessionId !== null AND this.isExpired():
+      log.warn('lock', 'Lock expired — force releasing', { activeSessionId })
+      this.forceRelease()
+    activeSessionId = sessionId
+    acquiredAt = Date.now()
+    lastHeartbeat = Date.now()
+    return true
+
+  heartbeat(sessionId: string): void
+    if activeSessionId === sessionId: lastHeartbeat = Date.now()
 
   release(sessionId: string): void
-    if activeSessionId === sessionId: activeSessionId = null
+    if activeSessionId === sessionId:
+      activeSessionId = null; acquiredAt = null; lastHeartbeat = null
 
-  isLocked(): boolean
-    return activeSessionId !== null
+  isExpired(): boolean
+    if acquiredAt is null: return false
+    return (Date.now() - acquiredAt) > LOCK_TIMEOUT_MS
 
-  getActiveId(): string | null
-    return activeSessionId
+  isHeartbeatStale(): boolean
+    if lastHeartbeat is null: return false
+    return (Date.now() - lastHeartbeat) > HEARTBEAT_TIMEOUT_MS
+
+  forceRelease(): void
+    log.warn('lock', 'Force-releasing stale lock', { activeSessionId })
+    activeSessionId = null; acquiredAt = null; lastHeartbeat = null
 }
 export const pipelineLock = new PipelineLock();  // singleton
 ```
+
+#### Heartbeat protocol
+
+Each pipeline step emits a heartbeat every **30 seconds** while running:
+
+```
+// In PostMeetingService, wrapping each step:
+const heartbeatInterval = setInterval(() => {
+  pipelineLock.heartbeat(sessionId)
+  logger.debug('pipeline', 'heartbeat', { sessionId, step })
+}, 30_000)
+
+try {
+  await runStep(sessionId, step)
+} finally {
+  clearInterval(heartbeatInterval)
+}
+```
+
+#### Watchdog
+
+A watchdog timer runs in the main process. If `pipelineLock.isHeartbeatStale()` returns true:
+
+```
+watchdog checks every 60s:
+  if pipelineLock.isHeartbeatStale():
+    log.error('watchdog', 'Heartbeat stale — killing child processes', { activeSessionId })
+    mediaService.killActiveProcess()     // kills ffmpeg if running
+    pipelineLock.forceRelease()
+    sessionStore.markError(activeSessionId, 'Processing watchdog triggered — retry required')
+    ipcMain.send('session:status', { sessionId: activeSessionId, status: 'error' })
+```
+
+#### Deepgram WebSocket inactivity
+
+SttService: if no message (partial or final) is received for **60 seconds**, force-close and reconnect the WebSocket. This prevents silent hangs when Deepgram stops sending frames without closing the connection.
 
 #### Persisted flag
 
@@ -1626,8 +1814,11 @@ Each line is a JSON object (newline-delimited):
 ```json
 { "ts": 1709500000000, "level": "info", "ctx": "pipeline", "msg": "step started", "sessionId": "uuid", "step": "batch_stt" }
 { "ts": 1709500001234, "level": "info", "ctx": "api", "msg": "whisper call", "sessionId": "uuid", "chunkIndex": 0, "fileSizeBytes": 14200000 }
+{ "ts": 1709500005678, "level": "warn", "ctx": "api", "msg": "whisper retry", "sessionId": "uuid", "attempt": 2, "waitMs": 4000 }
 { "ts": 1709500005678, "level": "error", "ctx": "api", "msg": "whisper error", "sessionId": "uuid", "code": 429, "retryAfter": 30 }
 { "ts": 1709500000100, "level": "info", "ctx": "ffmpeg", "msg": "process exited", "exitCode": 0, "durationMs": 4200 }
+{ "ts": 1709500000200, "level": "warn", "ctx": "watchdog", "msg": "heartbeat stale", "sessionId": "uuid" }
+{ "ts": 1709500000300, "level": "info", "ctx": "cleanup", "msg": "derived files deleted", "sessionId": "uuid", "freedBytes": 145000000 }
 ```
 
 #### What is logged
@@ -1635,9 +1826,10 @@ Each line is a JSON object (newline-delimited):
 | Category | What | What NOT |
 |----------|------|----------|
 | Pipeline | Step start/end, duration, session ID | Transcript text content |
-| AI API calls | Model, token counts, latency, error codes | API keys, request/response body |
+| AI API calls | Model, token counts, latency, error codes, retry attempts | API keys, request/response body |
 | ffmpeg | Exit code, duration, stderr snippet on error | Audio content |
-| App lifecycle | Startup, crash recovery actions, migration | — |
+| App lifecycle | Startup, crash recovery actions, migration, cleanup | — |
+| Watchdog | Stale heartbeat events, force-release actions | — |
 | Errors | All caught errors with stack (truncated to 500 chars) | — |
 
 **Privacy**: transcript text, speaker IDs, meeting titles, and API keys are **never** logged. Log files are safe to share for debugging.
@@ -1649,9 +1841,11 @@ Each line is a JSON object (newline-delimited):
 logger.info(ctx, msg, meta?)
 logger.warn(ctx, msg, meta?)
 logger.error(ctx, msg, meta?)
+logger.debug(ctx, msg, meta?)   // ← NEW v1.3 — heartbeat, watchdog
 
 // Usage in services:
 logger.info('pipeline', 'step started', { sessionId, step: 'batch_stt' })
+logger.warn('api', 'whisper retry', { sessionId, attempt: 2, waitMs: 4000 })
 logger.error('api', 'openai error', { sessionId, statusCode: 429 })
 ```
 
@@ -1696,3 +1890,412 @@ User can cancel or proceed. If cancelled: session marked `error` with message "U
 #### Future option — Cost dashboard
 
 Not implemented in v1.2.0, but `app.log` contains all token counts and API call metadata needed to build a per-session cost report in a future version. The log schema is designed to support this aggregation.
+
+---
+
+## 17. Enterprise Hardening Layer (v1.3.0)
+
+This section documents the six enterprise-hardening features added in v1.3.0. Core features from §1–§16 are unchanged; these features extend and protect them in enterprise-scale deployments.
+
+---
+
+### 17.1 Storage Location Customization
+
+#### Problem
+
+Sessions are stored by default in Electron's `userData` directory (`%APPDATA%/mtg-assistant/` on Windows), which resides on the system drive (typically C:). Importing large audio or video files — after conversion to 16kHz WAV — can consume hundreds of megabytes per session. Organizations with multiple users, or users processing multi-hour recordings daily, can fill the system drive within weeks.
+
+#### Design
+
+A new `StorageSettings` block is added to `AppSettings` (see §7). The key field is `storageRootPath`:
+
+```
+storageRootPath:      string    // where session data lives; default = userData
+allowExternalStorage: boolean   // if false: warn when user picks a non-userData path
+autoCleanupDays:      number    // 0 = disabled, default = 30
+copySourceFile:       boolean   // archive source file locally; default = false
+```
+
+**What moves with `storageRootPath`**:
+
+| Path | Movable | Notes |
+|------|---------|-------|
+| `sessions/{id}/` | Yes | All session files move with storageRoot |
+| `settings.json` | No | Always in userData — fast access on startup |
+| `app.json` | No | Session index — always in userData |
+| `vault.enc` | No | Encryption fallback — always in userData |
+| `logs/` | No | Always in userData |
+
+**Validation on storageRoot change**:
+
+```
+storage:setRoot { path }:
+  1. fs.accessSync(path, fs.constants.W_OK)   // writable?
+  2. diskMonitor.getFreeBytes(path) > 1_073_741_824  // > 1 GB free?
+  3. if existing sessions exist: offer to migrate (move all sessions/{id}/ dirs)
+  4. update settings.json.storage.storageRootPath
+  5. reload fileStore paths
+  Return: { ok: true } or { ok: false, error: 'INSUFFICIENT_SPACE' | 'NOT_WRITABLE' | 'MIGRATION_FAILED' }
+```
+
+**Migration**: session directories are moved with `fs.rename`. If source and target are on different volumes (rename fails), fall back to copy + delete with progress events.
+
+#### Source file handling
+
+| `copySourceFile` | Behavior | Tradeoff |
+|-----------------|----------|----------|
+| `false` (default) | `SessionMeta.sourceAbsolutePath` stores original path; no copy made | No extra disk; `prepare_audio` fails if original moved or deleted |
+| `true` | File copied to `sessions/{id}/source/`; `SessionMeta.sourceArchivedPath` set | Extra disk usage equal to source file size; retry always works |
+
+When `copySourceFile = false` and the original file is missing at retry time, the pipeline emits `error` with message: `"Source file not found: {path}. Re-import from new location."` The UI shows the original path and an option to pick a replacement file.
+
+#### Auto-cleanup service
+
+Runs on startup (after recovery scan) and on user demand via Settings → "今すぐクリーンアップ".
+
+```
+AutoCleanupService.run(dryRun = false): CleanupReport
+  threshold = now - (autoCleanupDays * 86_400_000)
+
+  for each session where:
+    session.status === 'done'
+    session.createdAt < threshold
+
+  Derived files to delete:
+    audio.wav              (typically largest — 50–300 MB per import session)
+    audio.pcm              (realtime raw — delete if session.status === 'done')
+    chunks/                (should already be gone; safety sweep)
+    transcript.jsonl       (recoverable from audio if ever needed)
+    normalized.json        (recoverable from transcript)
+
+  Always keep:
+    minutes.json           (primary user value)
+    export.md              (primary user value)
+    source/                (archived source, if present — user explicitly chose to archive)
+    pipeline.json          (checkpoint metadata — negligible size)
+```
+
+If `dryRun = true`, the report shows what would be deleted without deleting. This is used by the Settings UI "preview" button before the user confirms.
+
+**Disk tradeoffs** (documented in UI tooltip):
+
+| Mode | Notes |
+|------|-------|
+| `copySourceFile = false` (default) | Minimum disk. Source stays on original drive. Retry fails if file moves. |
+| `copySourceFile = true` | Double disk for source duration. Retry always works. |
+| `autoCleanupDays = 30` (default) | Derived files cleared after 30 days. Minutes + export permanently kept. |
+| `autoCleanupDays = 0` | No auto-cleanup. User manages storage manually. |
+
+---
+
+### 17.2 API Resilience — Exponential Backoff
+
+#### Problem
+
+Whisper and GPT API calls can fail transiently: HTTP 429 (rate limits), HTTP 5xx (server errors), or network timeouts. The current pipeline treats any failure as a permanent error requiring manual retry. Under enterprise-scale usage — multiple users sharing API keys, or large batch imports — transient failures are common and should be handled automatically.
+
+#### Retry policy
+
+A shared `retry.ts` utility wraps any async API call:
+
+```typescript
+// electron/utils/retry.ts
+interface RetryOptions {
+  maxAttempts:      number;       // default: 4 (1 initial + 3 retries)
+  baseDelayMs:      number;       // default: 2000
+  retryableStatus:  number[];     // default: [429, 500, 502, 503, 504]
+  onRetry?:         (attempt: number, waitMs: number) => void;
+}
+
+async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions): Promise<T>
+  for attempt = 1 to opts.maxAttempts:
+    try:
+      return await fn()
+    catch error:
+      if attempt === opts.maxAttempts: throw error
+      if error is non-retryable (400, 401, 403, 413): throw immediately
+      waitMs = opts.baseDelayMs * 2^(attempt - 1)   // 2s, 4s, 8s
+      opts.onRetry?.(attempt, waitMs)
+      logger.warn('api', 'retry scheduled', { attempt, waitMs, statusCode })
+      await sleep(waitMs)
+  throw lastError
+```
+
+**Retry schedule**:
+
+| Attempt | Wait before | Total elapsed |
+|---------|-------------|---------------|
+| 1 | — (immediate) | 0s |
+| 2 | 2s | 2s |
+| 3 | 4s | 6s |
+| 4 | 8s | 14s |
+| (fail) | — | ~14s |
+
+**Non-retryable errors** (fail immediately, no wait):
+
+| HTTP Status | Reason |
+|-------------|--------|
+| 400 | Bad request — will not succeed on retry |
+| 401 | Invalid API key — must fix in Settings |
+| 403 | Forbidden — check API plan |
+| 413 | File too large — chunking logic error |
+
+**Applied to**:
+- `BatchSttService`: each individual chunk upload (and single upload)
+- `SummarizationService`: each GPT-4o-mini chunk call, Reduction Pass call, GPT-4o Pass 2 call
+- `NormalizationService` Phase 2: each GPT-4o-mini batch call
+
+**UI feedback**:
+
+Each retry emits `session:status { step, retryAttempt: N, retryWaitMs: M }`. The `PipelineProgress` component shows:
+```
+⟳  batch_stt   再試行中 (2/4) … 4秒後に再開
+```
+
+**Logging**:
+
+```json
+{ "level": "warn", "ctx": "api", "msg": "retry", "attempt": 2, "waitMs": 4000, "statusCode": 429 }
+{ "level": "info", "ctx": "api", "msg": "retry success", "attempt": 3, "totalWaitMs": 6000 }
+```
+
+**Idempotency note**: Retry applies only to idempotent calls — Whisper transcription (deterministic for the same audio) and GPT summarization (non-deterministic but safe to retry since output replaces previous). Realtime Deepgram streaming is reconnect-based, not retry-based.
+
+---
+
+### 17.3 Process Watchdog & Lock Safety
+
+#### Problem
+
+If a child process (ffmpeg, or a spawned ffprobe) hangs — for example due to a corrupt input file that causes ffmpeg to loop indefinitely — the `PipelineLock` is never released. No new sessions can be started until the app is restarted. Similarly, if the Deepgram WebSocket stops sending frames without closing the connection, the pipeline may stall silently during realtime recording.
+
+#### PipelineLock deadlock prevention
+
+Full lock design is documented in §16.5. Summary of v1.3.0 additions:
+
+| Mechanism | Value | Purpose |
+|-----------|-------|---------|
+| Lock timeout | 2 hours | Hard ceiling — no pipeline should take longer |
+| Heartbeat interval | Every 30s | Step emits keep-alive while running |
+| Watchdog check interval | Every 60s | Main process checks heartbeat staleness |
+| Heartbeat stale threshold | 10 minutes | Time without heartbeat → assume hang |
+
+**Lock state recovery on restart**: On app startup, if `session.status === 'processing'` in `app.json`, the lock is implicitly released by the recovery scan which sets status to `error_recoverable`. The in-memory `PipelineLock` is reset to null on process startup — it holds no state across restarts.
+
+#### MediaService child process watchdog
+
+```
+// In MediaService.extractAudio / convertTo16kMonoWav:
+let lastProgressAt = Date.now()
+
+child.stderr.on('data', (chunk) => {
+  if (chunk.includes('time=')):
+    lastProgressAt = Date.now()
+    pipelineLock.heartbeat(sessionId)
+})
+
+const watchdogInterval = setInterval(() => {
+  if (Date.now() - lastProgressAt > 10 * 60 * 1000):
+    logger.error('watchdog', 'ffmpeg no progress for 10 min — killing', { sessionId })
+    child.kill('SIGKILL')
+    clearInterval(watchdogInterval)
+}, 60_000)
+
+child.on('exit', () => clearInterval(watchdogInterval))
+```
+
+#### Deepgram WebSocket inactivity timeout
+
+```
+// In SttService:
+let lastMessageAt = Date.now()
+
+ws.on('message', () => { lastMessageAt = Date.now() })
+
+setInterval(() => {
+  if (Date.now() - lastMessageAt > 60_000 AND ws.readyState === OPEN):
+    logger.warn('stt', 'WebSocket inactive for 60s — reconnecting')
+    ws.close()   // triggers reconnect logic
+}, 15_000)
+```
+
+The 60-second inactivity threshold is intentionally conservative — a meeting with a long silence pause should not trigger reconnect. The 15-second polling interval minimizes reconnect delay.
+
+---
+
+### 17.4 Reduction Pass Refinement
+
+This section captures the design rationale for the v1.3.0 Reduction Pass change (prose-based vs. forced bullet structure). The implementation details are in §5 SummarizationService and §16.3.
+
+#### Problem with v1.2.1 approach
+
+The forced four-section bullet output (`## Key Points / ## Decisions / ## Action Items / ## Risks`) in the Reduction Pass introduced hallucination of omission. When GPT-4o-mini compressed long summaries into four labeled sections:
+
+1. Items that spanned multiple categories (e.g., a decision that also created a risk) were placed in one section and lost from others.
+2. Minority opinions or "parking lot" items without a clear category were silently dropped.
+3. Pass 2 (GPT-4o) received a pre-classified input, biasing its extraction and reducing its ability to identify implicit decisions or risks in the original text.
+
+#### v1.3.0 design
+
+| Stage | v1.2.1 | v1.3.0 |
+|-------|--------|--------|
+| Pass 1 (per-chunk) | Bullet-hinted prose | Free-form prose (no structure prompt) |
+| Reduction Pass | Four forced sections (`##` headers) | Prose compression (paragraphs only) |
+| Pass 2 (final) | JSON extraction from mixed input | JSON extraction from clean prose |
+| Structured output | Split across passes | Single extraction point at Pass 2 |
+
+#### Prompt engineering constraints
+
+- Pass 1 prompt must not mention "decisions", "action items", etc. by name — this primes the model to over-classify and under-extract.
+- Reduction Pass prompt explicitly forbids bullet lists and headers to prevent re-classification.
+- Pass 2 (GPT-4o strict JSON schema) is the only place where classification and extraction happens, ensuring consistency and reducing hallucination risk.
+
+#### Tradeoff
+
+Prose summaries in Pass 1 and Reduction Pass are slightly longer than bullet-compressed equivalents (~10–20% more tokens). This increases cost marginally but is dominated by the reduction in re-runs caused by missing information in v1.2.1 minutes.
+
+---
+
+### 17.5 FFmpeg Enterprise Code-Signing
+
+#### Problem
+
+Without code-signing, both the Electron app executable and the bundled ffmpeg/ffprobe binaries may be flagged by antivirus software, Microsoft Defender SmartScreen (Windows), or macOS Gatekeeper as unverified publishers. In enterprise environments with strict endpoint protection, unsigned binaries are often blocked or quarantined automatically — including ffmpeg, which is unpacked from the asar archive at runtime.
+
+#### Requirements
+
+| Component | Platform | Signing requirement |
+|-----------|----------|-------------------|
+| Electron app (`.exe` / `.app`) | Windows, macOS | Must be code-signed with valid EV certificate |
+| `ffmpeg.exe` / `ffmpeg` binary | Windows, macOS | Must be code-signed separately — it is an unpacked external binary |
+| `ffprobe.exe` / `ffprobe` binary | Windows, macOS | Same as ffmpeg |
+| Installer (`.msi` / `.dmg`) | Windows, macOS | Must be signed by the same certificate |
+
+#### CI/CD pipeline requirement
+
+Code-signing must occur in the CI/CD build pipeline, not on developer machines:
+
+```
+Build pipeline (GitHub Actions / Azure DevOps):
+
+Windows build:
+  1. electron-vite build
+  2. signtool sign /fd sha256 /tr http://timestamp.url /td sha256
+        out/resources/ffmpeg.exe
+        out/resources/ffprobe.exe
+  3. electron-builder (builds .exe / .msi installer)
+  4. signtool sign ... dist/MTGAssistant-Setup.exe
+
+macOS build:
+  1. electron-vite build
+  2. codesign --deep --force --verify --verbose
+        --sign "Developer ID Application: Org Name (TEAMID)"
+        --entitlements entitlements.plist
+        out/resources/ffmpeg
+        out/resources/ffprobe
+  3. electron-builder (builds .dmg / .pkg)
+  4. codesign + notarize dist/MTGAssistant.dmg
+```
+
+#### Certificate management
+
+- Windows: EV (Extended Validation) Code Signing Certificate from a CA (DigiCert, Sectigo). Stored as `PFX` secret in CI/CD vault.
+- macOS: Apple Developer ID Application certificate. Stored in CI/CD keychain. Requires Apple notarization (`xcrun notarytool`) for distribution outside Mac App Store.
+- Certificates **must not** be stored in source control or on developer workstations — CI/CD secrets vault only.
+
+#### Build verification step
+
+After signing, CI must verify:
+
+```
+# Windows
+signtool verify /pa out/resources/ffmpeg.exe
+signtool verify /pa dist/MTGAssistant-Setup.exe
+
+# macOS
+codesign --verify --verbose out/resources/ffmpeg
+spctl --assess --verbose dist/MTGAssistant.dmg
+```
+
+Builds that fail signature verification are rejected — artifact is not published.
+
+#### Developer workflow
+
+Developers run unsigned builds in development mode (`node scripts/dev.js`). Signing only occurs in CI. The `ffmpeg-path.ts` resolver differentiates `app.isPackaged` (signed CI build) from development (unsigned `node_modules`).
+
+---
+
+### 17.6 Disk Usage Monitoring
+
+#### Problem
+
+`storageRoot` can fill up silently. Without monitoring, the user discovers disk-full errors mid-pipeline — at the worst possible time (while transcribing a long import).
+
+#### Design
+
+A `DiskMonitor` singleton runs in the main process. It polls free space on the `storageRoot` volume every **5 minutes** while the app is open.
+
+```typescript
+// electron/utils/disk-monitor.ts
+class DiskMonitor {
+  private readonly POLL_INTERVAL_MS = 5 * 60 * 1000
+  private readonly WARN_THRESHOLD_BYTES  = 5  * 1024 * 1024 * 1024  // 5 GB
+  private readonly BLOCK_THRESHOLD_BYTES = 500 * 1024 * 1024         // 500 MB
+
+  start(): void
+    setInterval(() => this.check(), POLL_INTERVAL_MS)
+    this.check()   // immediate check on startup
+
+  async check(): Promise<void>
+    freeBytes = await this.getFreeBytes(storageRootPath)
+    if freeBytes < WARN_THRESHOLD_BYTES:
+      ipcMain.send('storage:warning', { freeBytes, threshold: WARN_THRESHOLD_BYTES })
+      logger.warn('disk', 'low free space', { freeBytes, path: storageRootPath })
+
+  getFreeBytes(dirPath: string): Promise<number>
+    // Windows: uses statvfs-equivalent via Node fs/promises or native module
+    // macOS/Linux: uses fs.statfs (Node 22+) or child_process df
+```
+
+**Blocking behavior**: If `freeBytes < BLOCK_THRESHOLD_BYTES` (500 MB), new imports are blocked immediately with an error: `"空き容量が不足しています。ストレージを解放してから再試行してください。"`.
+
+#### UI surface
+
+**Dashboard warning banner** (shown when `storage:warning` push received):
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ ⚠ ストレージの空き容量が少なくなっています (残 3.2 GB)             │
+│   設定でストレージ先を変更するか、古いセッションを削除してください。 │
+│                                              [設定を開く] [閉じる]│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Banner is **dismissible per session** (dismissed state not persisted — re-appears on next poll below threshold).
+
+**Settings page — Storage section** shows:
+
+| Element | Content |
+|---------|---------|
+| Storage location | Path + free space display (`空き容量: 42.3 GB`) |
+| Total used | Sum of all session file sizes (`使用容量: 2.4 GB`) |
+| Per-session breakdown | Expandable table: session title, date, size, delete button |
+| Cleanup button | "今すぐクリーンアップ" — triggers `storage:runCleanup` with preview (`dryRun: true`) first |
+
+**Session card** (Dashboard list item): optionally shows session disk usage if `SessionMeta.diskUsageBytes` is set. Displayed as a small muted label: `"1.2 GB"`. Computed lazily after session completes and cached in `SessionMeta`.
+
+#### `storage:getStats` implementation
+
+```
+storage:getStats (IPC invoke):
+  1. Read all sessions from sessionStore
+  2. For each session: sum file sizes under {storageRoot}/sessions/{id}/
+  3. Get free bytes on storageRoot volume
+  4. Return StorageStats
+```
+
+Stat computation is done in a background task (non-blocking) to avoid slowing the IPC response. First call returns a cached value (or empty) immediately; updated result is pushed via a follow-up `session:status`-style event if needed.
+
+---
+
+*End of DESIGN.md v1.3.0*
