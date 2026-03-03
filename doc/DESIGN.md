@@ -1,6 +1,6 @@
 # MTG Assistant — Design Document
 
-**Version**: 1.2.1
+**Version**: 1.2.2
 **Stack**: Electron 31 + React 18 + TypeScript 5.5 + Tailwind CSS 3
 **Platform**: Windows (primary), macOS
 
@@ -14,6 +14,7 @@
 | 1.1.0 | 2026-03 | **Import mode**: audio/video file import, MediaService (ffmpeg), pipeline checkpoint, crash recovery |
 | 1.2.0 | 2026-03 | **Production Hardening**: chunk-based Whisper for long audio, hierarchical summarization, secure keytar storage + encrypted fallback, concurrency guard, structured logging with rotation, cost governance guardrails |
 | 1.2.1 | 2026-03 | **Audit corrections**: chunk trigger is WAV file-size only (post-conversion); dedup uses text-similarity not startMs window; hierarchical reduction pass explicitly defined; idempotency skip validates file content not just existence |
+| 1.2.2 | 2026-03 | **CTO review fixes**: architecture diagram corrected (keytar + vault.enc fallback, not vault.json); `apikey:get` removed (plaintext leak), replaced with `apikey:getMasked`; chunk overlap removed (Approach A — no overlap, dedup is optional guard only); Whisper cost corrected ($0.006/min: 30 min=$0.18, 1 h=$0.36, 2 h=$0.72) |
 
 ---
 
@@ -79,7 +80,7 @@ MTG Assistant is a **local-first** desktop application that records (or imports)
 │  │ Stores                                              │     │
 │  │  session.store (app.json)                           │     │
 │  │  file.store    (sessions/{id}/...)       ← updated  │     │
-│  │  secret.store  (vault.json)                         │     │
+│  │  secret.store  (keytar + vault.enc fallback)        │     │
 │  └─────────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────────┘
               │
@@ -118,7 +119,7 @@ Security: `contextIsolation: true`, `nodeIntegration: false`. Preload exposes ty
 | `settings:get` | — | `AppSettings` |
 | `settings:save` | `Partial<AppSettings>` | `void` |
 | `apikey:set` | `{ service, key }` | `void` |
-| `apikey:get` | `{ service }` | `string \| null` |
+| `apikey:getMasked` | `{ service }` | `string \| null` — returns `"****abcd"` (last 4 chars) or `null` |
 | `apikey:exists` | `{ service }` | `boolean` |
 | `export:markdown` | `{ sessionId }` | `{ filePath }` |
 
@@ -293,9 +294,9 @@ Whisper-1 has a hard **25 MB file size limit** and degrades above ~30 minutes of
 
 **Memory usage**: each chunk is read as a stream for upload; the merged segment array is the only in-memory structure. Peak RAM ≈ single chunk size (~15 MB WAV slice) + segment JSON.
 
-**Overlap handling and deduplication (v1.2.1)**:
+**Deduplication (v1.2.2 — optional guard)**:
 
-Each chunk includes the last 5 seconds of the previous chunk to avoid cutting words at boundaries. After offset adjustment, adjacent chunk results may contain near-duplicate segments. Deduplication uses **text-similarity comparison**, not startMs window matching (which risks deleting valid content at chunk boundaries):
+Chunks are created with **no audio overlap** (ffmpeg segment muxer, stream-copy). Because cuts happen at exact 15-minute boundaries, boundary-crossing words may be split between two chunks, but genuine duplicate segments do not occur in normal operation. Deduplication is therefore an **optional defensive guard** against unusual Whisper output, not a required pipeline step:
 
 ```
 After merging all offset-adjusted segments into a flat array,
@@ -312,7 +313,7 @@ For each pair of consecutive segments (A, B):
 
 `levenshteinSimilarity(a, b) = 1 - (editDistance(a,b) / max(len(a), len(b)))`
 
-This ensures only genuine transcript duplicates (same words spoken at the boundary) are removed, while short distinct utterances near a chunk boundary are preserved.
+This guard is triggered only when Whisper produces near-identical text within a 3-second window at a chunk boundary — a rare edge case, not the common path.
 
 **Single-chunk path** (WAV ≤ 24 MB): no chunking, direct upload. No dedup needed.
 
@@ -701,7 +702,7 @@ Retry button calls `session:retryStep` IPC with `{ sessionId, step: 'normalizing
 | Unsupported file format | File dialog filter prevents selection; if bypassed, ffprobe returns error → shown on probe |
 | Whisper API failure | Pipeline pauses at `batch_stt`, writes error to `pipeline.json`, emits `session:status` with `status:'error'` → retry button in PostMeeting |
 | GPT rate limit / timeout | Same pattern for `normalizing` and `summarizing` steps |
-| Import of long audio (WAV > 24 MB after conversion) | `BatchSttService` checks `wavFileSizeBytes` after MediaService conversion; if > 24 MB, splits into 15-min chunks via ffmpeg segment muxer, transcribes each sequentially, deduplicates overlap by text-similarity (≥ 0.95), merges with offset-adjusted `TranscriptSegment[]` |
+| Import of long audio (WAV > 24 MB after conversion) | `BatchSttService` checks `wavFileSizeBytes` after MediaService conversion; if > 24 MB, splits into 15-min chunks (no overlap) via ffmpeg segment muxer, transcribes each sequentially, applies optional text-similarity dedup guard (≥ 0.95), merges with offset-adjusted `TranscriptSegment[]` |
 | App crash mid-ffmpeg | ffmpeg child process dies with app; `pipeline.json` will still show `prepare_audio: pending` → recoverable on restart |
 | Disk full during conversion | ffmpeg exits non-zero; caught → `FfmpegError` → error state in PostMeeting |
 
@@ -1229,7 +1230,7 @@ ffprobePath = path.join(base, 'node_modules/ffprobe-static/...')
 | F1 | Import MP3 ~10 min | Converts to WAV, Whisper transcribes, full pipeline runs, PostMeeting shows minutes |
 | F2 | Import MP4 ~30 min with audio | Audio extracted, same pipeline, correct duration in SessionMeta |
 | F3 | Import MP4 with no audio stream | `probe` returns `hasAudio: false`, Import button disabled, no session created |
-| F4 | Import audio file where converted WAV > 24 MB (e.g., 2h MP3 → ~110 MB WAV) | `BatchSttService` checks `wavFileSizeBytes` post-conversion; chunk mode triggered; all segments merged with correct offsets; text-similarity dedup removes boundary duplicates; timestamps correct |
+| F4 | Import audio file where converted WAV > 24 MB (e.g., 2h MP3 → ~110 MB WAV) | `BatchSttService` checks `wavFileSizeBytes` post-conversion; chunk mode triggered; all segments merged with correct offsets; dedup guard runs (no-op in normal case); timestamps correct |
 | F5 | Whisper API failure (network off) | Status = error at `batch_stt`, retry button shown, retry succeeds when network restored |
 | F6 | App crash during `normalizing` | Relaunch: session shows `error_recoverable`, resume from `normalizing`, skips `batch_stt`/`lang_detect` |
 | F7 | App crash during `prepare_audio` (ffmpeg running) | Relaunch: `audio.wav` absent or partial (tmp not renamed), session marked `error_recoverable` with message "re-import required" |
@@ -1378,9 +1379,11 @@ for each chunk at index i:
     segment.endMs   += offset
 ```
 
-#### Overlap deduplication (v1.2.1)
+#### Deduplication guard (v1.2.2 — no overlap, optional guard)
 
-Each ffmpeg chunk includes the last 5 seconds of the previous chunk's audio to prevent mid-word cuts. After offset adjustment, boundary segments may be near-duplicates. Deduplication uses **text-similarity**, not startMs window matching (which incorrectly deletes distinct utterances near boundaries):
+Chunks are created with **no audio overlap** — the ffmpeg segment muxer performs a stream-copy cut at exact 15-minute boundaries. Genuine duplicate segments do not occur in normal operation.
+
+A **text-similarity dedup guard** runs as a defensive check after offset adjustment. It catches the rare case where Whisper produces near-identical output for a word that straddles a chunk boundary:
 
 ```
 Sort merged segments by startMs ascending.
@@ -1394,7 +1397,7 @@ For each consecutive pair (A, B):
       keep A, discard B
 ```
 
-Only near-exact text matches within a 3-second window are deduplicated. Short distinct utterances near chunk boundaries are always preserved.
+Only near-exact text matches within a 3-second window are removed. This path is expected to trigger rarely or never in production.
 
 #### Memory ceiling
 
@@ -1539,7 +1542,7 @@ delete(service): Promise<void>
 
 #### Renderer isolation
 
-The renderer **never receives raw API keys**. All API calls are made in the main process. The `apikey:get` IPC (added in v1.0) is used only for the masked display in Settings UI — the plaintext key is fetched only when the user explicitly clicks 表示, and is held in renderer memory only for the duration of the display.
+The renderer **never receives raw API keys**. All API calls are made in the main process. The Settings UI calls `apikey:getMasked` to display a masked value (`"****abcd"`) — the plaintext key is never sent to the renderer under any circumstances. There is no reveal/表示 feature; the masked value is sufficient for the user to confirm a key is set.
 
 #### Migration from `vault.json`
 
@@ -1660,9 +1663,9 @@ logger.error('api', 'openai error', { sessionId, statusCode: 429 })
 
 | Meeting length | Whisper (STT) | GPT-4o-mini (norm+pass1) | GPT-4o (pass2) | Total |
 |---------------|---------------|--------------------------|-----------------|-------|
-| 30 min | ~$0.09 | ~$0.01 | ~$0.04 | **~$0.14** |
-| 1 hour | ~$0.18 | ~$0.02 | ~$0.04 | **~$0.24** |
-| 2 hours | ~$0.36 | ~$0.04 | ~$0.04 | **~$0.44** |
+| 30 min | ~$0.18 | ~$0.01 | ~$0.04 | **~$0.23** |
+| 1 hour | ~$0.36 | ~$0.02 | ~$0.04 | **~$0.42** |
+| 2 hours | ~$0.72 | ~$0.04 | ~$0.04 | **~$0.80** |
 
 Assumptions: Whisper at $0.006/min; gpt-4o-mini at $0.15/1M in + $0.60/1M out; gpt-4o at $5/1M in + $15/1M out. Prices indicative at March 2026.
 
@@ -1684,10 +1687,10 @@ Note: DeepL cost (realtime translation, if enabled) is separate and not included
 If Pass 1 in hierarchical summarization would require > 5 chunk calls (meeting > ~1.5 hours of dense speech):
 
 ```
-session:status push → { sessionId, warning: 'HIGH_COST_EXPECTED', estimatedUSD: 0.40 }
+session:status push → { sessionId, warning: 'HIGH_COST_EXPECTED', estimatedUSD: 0.62 }
 ```
 
-UI shows a dismissible banner: "この会議の処理には推定 $0.40 のAPI費用が発生します。続けますか？"
+UI shows a dismissible banner: "この会議の処理には推定 $0.62 のAPI費用が発生します。続けますか？"
 User can cancel or proceed. If cancelled: session marked `error` with message "User cancelled due to cost estimate".
 
 #### Future option — Cost dashboard
