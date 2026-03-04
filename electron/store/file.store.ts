@@ -30,7 +30,7 @@ export const fileStore = {
   },
 
   writeJson(id: string, file: string, data: unknown): void {
-    const p = paths.sessionFile(id, file);
+    const p   = paths.sessionFile(id, file);
     const tmp = p + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
     fs.renameSync(tmp, p);
@@ -42,9 +42,12 @@ export const fileStore = {
     try { return JSON.parse(fs.readFileSync(p, 'utf-8')) as T; } catch { return null; }
   },
 
+  /** Atomic write: write to .tmp then rename to final path. */
   writeMd(id: string, file: string, content: string): string {
-    const p = paths.sessionFile(id, file);
-    fs.writeFileSync(p, content, 'utf-8');
+    const p   = paths.sessionFile(id, file);
+    const tmp = p + '.tmp';
+    fs.writeFileSync(tmp, content, 'utf-8');
+    fs.renameSync(tmp, p);
     return p;
   },
 
@@ -82,20 +85,55 @@ export const fileStore = {
   },
 
   /**
-   * Checks if a step's output file is valid (exists + non-empty).
-   * Used for idempotency before re-running a step.
+   * Strict validation of transcript.jsonl.
+   * Every line must parse as JSON and contain text:string, startMs:number, endMs:number.
+   * Returns false if file is missing, empty, or any line is malformed.
+   */
+  validateTranscriptJsonl(id: string): boolean {
+    const p = paths.sessionFile(id, 'transcript.jsonl');
+    if (!fs.existsSync(p)) return false;
+    try {
+      const lines = fs.readFileSync(p, 'utf-8').split('\n').filter(Boolean);
+      if (lines.length === 0) return false;
+      for (const line of lines) {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+        if (typeof obj.text    !== 'string') return false;
+        if (typeof obj.startMs !== 'number') return false;
+        if (typeof obj.endMs   !== 'number') return false;
+      }
+      return true;
+    } catch { return false; }
+  },
+
+  /**
+   * Checks if a step's output is fully valid.
+   * Used for idempotency skip AND resume source-of-truth check.
    */
   isStepOutputValid(id: string, step: string): boolean {
     const checks: Record<string, () => boolean> = {
       prepare_audio: () => this.exists(id, 'audio.wav'),
-      batch_stt:     () => { const s = this.readJsonl(id, 'transcript.jsonl'); return s.length > 0; },
-      lang_detect:   () => {
-        const s = this.readJsonl<{ detectedLang?: unknown }>(id, 'transcript.jsonl');
-        return s.length > 0 && s.every(x => x.detectedLang != null);
+
+      // Strict: validate every JSONL line has required fields
+      batch_stt: () => this.validateTranscriptJsonl(id),
+
+      // On top of strict transcript validation, every segment must have detectedLang
+      lang_detect: () => {
+        if (!this.validateTranscriptJsonl(id)) return false;
+        const segs = this.readJsonl<{ detectedLang?: unknown }>(id, 'transcript.jsonl');
+        return segs.length > 0 && segs.every(x => x.detectedLang != null);
       },
-      normalizing:   () => { const n = this.readJson<unknown[]>(id, 'normalized.json'); return Array.isArray(n) && n.length > 0; },
-      summarizing:   () => { const m = this.readJson<{ data?: unknown }>(id, 'minutes.json'); return m?.data != null; },
-      exporting:     () => this.exists(id, 'export.md'),
+
+      normalizing: () => {
+        const n = this.readJson<unknown[]>(id, 'normalized.json');
+        return Array.isArray(n) && n.length > 0;
+      },
+
+      summarizing: () => {
+        const m = this.readJson<{ data?: unknown }>(id, 'minutes.json');
+        return m?.data != null;
+      },
+
+      exporting: () => this.exists(id, 'export.md'),
     };
     return checks[step]?.() ?? false;
   },

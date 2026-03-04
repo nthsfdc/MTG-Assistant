@@ -3,7 +3,6 @@ import { sessionStore } from '../store/session.store';
 import { fileStore } from '../store/file.store';
 import { pipelineLock } from '../utils/pipeline-lock';
 import { logger } from '../utils/logger';
-import { retry } from '../utils/retry';
 import { killFfmpeg } from './media.service';
 import type { LangCode, InputType, PipelineStep, PipelineState, TranscriptSegment, NormalizedSegment, MeetingMinutes } from '../../shared/types';
 
@@ -31,7 +30,7 @@ function writeCheckpoint(sessionId: string, steps: PipelineStep[], currentStep: 
 class PostMeetingService {
   /**
    * Run (or resume) the post-meeting pipeline.
-   * @param startFrom  If provided, jump to this step (crash recovery / retry).
+   * @param startFrom  If provided, jump to this step (explicit crash recovery / retry).
    * @param sourceFilePath  Required for import sessions' prepare_audio step.
    */
   async run(
@@ -45,21 +44,30 @@ class PostMeetingService {
 
     const steps = inputType === 'import' ? STEPS_IMPORT : STEPS_RECORDING;
 
-    // Determine start index
+    // Determine start index.
+    // If startFrom is explicitly given (retry/retryStep), use it directly.
+    // Otherwise (resume after crash), use output validation as the source of truth:
+    // scan steps in order and resume from the first one whose output is NOT valid.
+    // This is safer than trusting the checkpoint status alone — a step might be marked
+    // "done" in pipeline.json but its output file corrupted or missing.
     let startIdx = 0;
     if (startFrom) {
       const i = steps.indexOf(startFrom);
       if (i >= 0) startIdx = i;
     } else {
-      // Resume from checkpoint: find first non-done step
-      const cp = fileStore.readPipeline(sessionId);
-      if (cp) {
-        const firstPending = cp.steps.findIndex(s => s.status !== 'done');
-        if (firstPending >= 0) {
-          const pendingStep = cp.steps[firstPending].name;
-          const i = steps.indexOf(pendingStep);
-          if (i >= 0) startIdx = i;
+      startIdx = steps.length; // default: assume all done
+      for (let i = 0; i < steps.length; i++) {
+        if (!fileStore.isStepOutputValid(sessionId, steps[i])) {
+          startIdx = i;
+          break;
         }
+      }
+      if (startIdx === steps.length) {
+        // All outputs valid — pipeline was already complete
+        logger.info('[Pipeline] all outputs valid, nothing to run', { sessionId });
+        sessionStore.update(sessionId, { status: 'done' });
+        pipelineLock.release();
+        return;
       }
     }
 
@@ -68,20 +76,25 @@ class PostMeetingService {
         const step = steps[i];
         pipelineLock.touch();
 
-        // Idempotency: skip if output already valid
+        // Idempotency: skip if output is already valid (covers steps after startIdx
+        // that may have been completed in a previous partial run)
         if (fileStore.isStepOutputValid(sessionId, step)) {
-          logger.info('[Pipeline] step already done (idempotent skip)', { sessionId, step });
+          logger.info('[Pipeline] step already valid, skipping', { sessionId, step });
           writeCheckpoint(sessionId, steps, step, 'done');
           continue;
         }
 
         notify(win, sessionId, step);
         writeCheckpoint(sessionId, steps, step, 'running');
-        logger.info('[Pipeline] running step', { sessionId, step });
 
-        await retry(() => this._runStep(sessionId, step, lang, win, sourceFilePath));
+        const stepStart = Date.now();
+        logger.info('[Pipeline] step start', { sessionId, step, startedAt: new Date(stepStart).toISOString() });
+
+        await this._runStep(sessionId, step, lang, win, sourceFilePath);
+
+        const durationMs = Date.now() - stepStart;
         writeCheckpoint(sessionId, steps, step, 'done');
-        logger.info('[Pipeline] step done', { sessionId, step });
+        logger.info('[Pipeline] step done', { sessionId, step, durationMs });
       }
 
       sessionStore.update(sessionId, { status: 'done' });
@@ -92,7 +105,7 @@ class PostMeetingService {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error('[Pipeline] failed', { sessionId, error: msg });
-      // Mark as recoverable if it's a transient API error (not a 4xx)
+      // Mark as recoverable if it's a transient error (not a 4xx client error)
       const status4xx = (err as { status?: number })?.status;
       const recoverable = !status4xx || status4xx >= 500;
       sessionStore.markError(sessionId, msg, recoverable);

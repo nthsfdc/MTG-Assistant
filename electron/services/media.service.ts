@@ -33,17 +33,49 @@ function runFfprobe(args: string[]): Promise<string> {
   });
 }
 
+const WATCHDOG_INTERVAL_MS = 30_000;       // check every 30 s
+const WATCHDOG_STALL_MS    = 5 * 60_000;  // kill if no stderr progress for 5 min
+
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn(getFfmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
     _ffmpegProc = proc;
-    let errOut = '';
-    proc.stderr.on('data', d => { errOut += d; });
-    proc.on('close', code => {
+
+    let errOut       = '';
+    let lastProgress = Date.now();
+    let settled      = false;
+    let watchdog: ReturnType<typeof setInterval>;
+
+    const done = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(watchdog);
       _ffmpegProc = null;
-      code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}: ${errOut.slice(-200)}`));
+      if (err) reject(err); else resolve();
+    };
+
+    proc.stderr.on('data', (d: Buffer) => {
+      lastProgress = Date.now();
+      errOut += d;
     });
-    proc.on('error', err => { _ffmpegProc = null; reject(err); });
+
+    proc.on('close', code => {
+      code === 0
+        ? done()
+        : done(new Error(`ffmpeg exit ${code}: ${errOut.slice(-200)}`));
+    });
+
+    proc.on('error', err => done(err));
+
+    // Watchdog: kill ffmpeg if it produces no stderr output for 5 minutes.
+    // ffmpeg writes progress lines to stderr continuously while transcoding.
+    watchdog = setInterval(() => {
+      if (Date.now() - lastProgress > WATCHDOG_STALL_MS) {
+        logger.warn('[MediaService] ffmpeg watchdog: no progress for 5 min, killing process');
+        proc.kill('SIGKILL');
+        done(new Error('ffmpeg process stuck (watchdog timeout after 5 min)'));
+      }
+    }, WATCHDOG_INTERVAL_MS);
   });
 }
 
@@ -57,9 +89,9 @@ class MediaService {
       streams: { codec_type: string }[];
     };
     return {
-      format:      info.format.format_name ?? 'unknown',
-      durationSec: parseFloat(info.format.duration ?? '0'),
-      hasAudio:    info.streams.some(s => s.codec_type === 'audio'),
+      format:        info.format.format_name ?? 'unknown',
+      durationSec:   parseFloat(info.format.duration ?? '0'),
+      hasAudio:      info.streams.some(s => s.codec_type === 'audio'),
       fileSizeBytes: parseInt(info.format.size ?? '0'),
     };
   }
