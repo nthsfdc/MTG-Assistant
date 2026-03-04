@@ -30,10 +30,36 @@ export function PipelineProgress({ pipeline, status, onRetry, onResume }: Props)
 
   if (!pipeline) return null;
 
+  // Progress calculation
+  const total      = steps.length;
+  const doneCount  = steps.filter(s => s.status === 'done').length;
+  const runningIdx = steps.findIndex(s => s.status === 'running');
+  // current = steps completed so far (running step counts as in-progress, not done)
+  const current    = runningIdx >= 0 ? runningIdx : doneCount;
+  const pct        = total > 0 ? Math.round((current / total) * 100) : 0;
+  const isActive   = status === 'processing';
+
   return (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
+      {/* Progress bar — shown only while actively processing */}
+      {isActive && total > 0 && (
+        <div className="mb-2">
+          <div className="flex items-center justify-between text-xs text-text-muted mb-1">
+            <span>{pct}%</span>
+            <span>{t.post.progressStep(current, total)}</span>
+          </div>
+          <div className="w-full bg-surface-2 rounded-full h-1.5">
+            <div
+              className="bg-accent h-1.5 rounded-full transition-all duration-500"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Step list */}
       {steps.map(step => (
-        <div key={step.name} className="flex items-center gap-2.5 py-1">
+        <div key={step.name} className="flex items-center gap-2.5 py-0.5">
           <span className={`text-xs w-4 text-center flex-shrink-0 ${
             step.status === 'done'    ? 'text-green-400' :
             step.status === 'running' ? 'text-accent animate-pulse' :
