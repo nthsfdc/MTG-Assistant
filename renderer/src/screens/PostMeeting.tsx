@@ -24,6 +24,8 @@ type MergedBlock = {
   startMs: number | undefined;
 };
 
+type TranscriptParagraph = { startMs: number | undefined; sentences: string[] };
+
 const JA_PUNCT = /[。！？…]$/;
 const JA_PARTICLE_START = /^[をがはにへのでもとや]/;
 const JA_MID_END = /[をがはにへのでもとやてにをがはにへのでもとや]$/;
@@ -44,6 +46,46 @@ function joinLatin(prev: string, next: string): string {
 
 function cleanJa(text: string): string {
   return text.replace(INNER_SPACE_JA, '').replace(/\s+/g, '');
+}
+
+// ── Transcript readability utilities ─────────────────────────────────────────
+
+/** Fix common punctuation artifacts from spoken-text STT output. */
+function normalizePunctuation(text: string): string {
+  return text
+    .replace(/\s+([,.;:!?。、！？])/g, '$1')  // spaces before punctuation
+    .replace(/\.{2,}/g, '.')                   // ".." → "."
+    .replace(/,{2,}/g, ',')                    // ",," → ","
+    .replace(/[。]{2,}/g, '。')                // "。。" → "。"
+    .replace(/[、]{2,}/g, '、')                // "、、" → "、"
+    .replace(/、。/g, '。')                     // "、。" → "。"
+    .replace(/。[、,]/g, '。')                  // "。、" "。," → "。"
+    .replace(/[,.]\./g, '.')                   // ",." → "."
+    .replace(/\.,/g, '.');                     // ".," → "."
+}
+
+/** Split text into individual sentences on terminal punctuation. */
+function splitSentences(text: string): string[] {
+  return text
+    .split(/(?<=[。！？!?])\s*/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+}
+
+/** Group sentences into display paragraphs (≤ maxSentences or ≤ maxChars). */
+function groupParagraphs(sentences: string[], maxSentences = 3, maxChars = 150): string[][] {
+  if (sentences.length === 0) return [];
+  const groups: string[][] = [];
+  let cur: string[] = [];
+  let len = 0;
+  for (const s of sentences) {
+    if (cur.length > 0 && (cur.length >= maxSentences || len + s.length > maxChars)) {
+      groups.push(cur); cur = []; len = 0;
+    }
+    cur.push(s); len += s.length;
+  }
+  if (cur.length > 0) groups.push(cur);
+  return groups;
 }
 
 /** Build paragraphs from normalized segments, carrying the timestamp of the first segment in each paragraph. */
@@ -167,6 +209,14 @@ export function PostMeeting() {
   // Build sourceId → startMs lookup from raw segments (used for timestamps only; raw text not shown)
   const startMsById = new Map<string, number>(detail.segments.map(s => [s.id, s.startMs]));
 
+  // Build display paragraphs for 文字起こし tab
+  const transcriptParagraphs: TranscriptParagraph[] = !detail.normalized ? [] :
+    mergeConsecutive(detail.normalized, startMsById).flatMap(blk => {
+      const groups = groupParagraphs(splitSentences(normalizePunctuation(blk.normalizedText)));
+      if (groups.length === 0) return [{ startMs: blk.startMs, sentences: [blk.normalizedText] }];
+      return groups.map((sents, gi) => ({ startMs: gi === 0 ? blk.startMs : undefined, sentences: sents }));
+    });
+
   const TABS: Tab[] = ['overview', 'transcript', 'todos'];
   const tabLabels: Record<Tab, string> = {
     overview:   t.post.tabs.overview,
@@ -268,15 +318,17 @@ export function PostMeeting() {
         )}
 
         {tab === 'transcript' && (
-          <div className="w-full space-y-3">
-            {!detail.normalized || detail.normalized.length === 0
+          <div className="max-w-3xl space-y-5">
+            {transcriptParagraphs.length === 0
               ? <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noTranscript}</p>
-              : mergeConsecutive(detail.normalized, startMsById).map((blk, i) => (
-                <div key={i} className="flex gap-3">
-                  <span className="text-xs text-text-muted font-mono pt-0.5 w-14 text-right flex-shrink-0">
-                    {blk.startMs != null ? formatMs(blk.startMs) : ''}
-                  </span>
-                  <p className="text-sm text-text-primary leading-relaxed">{blk.normalizedText}</p>
+              : transcriptParagraphs.map((para, i) => (
+                <div key={i}>
+                  {para.startMs != null && (
+                    <div className="text-xs text-text-muted font-mono mb-1">{formatMs(para.startMs)}</div>
+                  )}
+                  <p className="text-base text-text-primary leading-relaxed whitespace-pre-line">
+                    {para.sentences.join('\n')}
+                  </p>
                 </div>
               ))
             }
