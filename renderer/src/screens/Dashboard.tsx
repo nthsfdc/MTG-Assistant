@@ -35,8 +35,10 @@ function Skeleton() {
 export function Dashboard() {
   const { t } = useT();
   const { sessions, loadSessions, deleteSession } = useSessionStore();
-  const [loading, setLoading] = useState(true);
+  const [loading,     setLoading]     = useState(true);
   const [diskWarning, setDiskWarning] = useState<StorageWarningEvent | null>(null);
+  const [query,       setQuery]       = useState('');
+  const [matchIds,    setMatchIds]    = useState<string[] | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -44,6 +46,13 @@ export function Dashboard() {
     const unsub = window.api.on.storageWarning(e => setDiskWarning(e));
     return () => unsub();
   }, [loadSessions]);
+
+  async function handleSearch(q: string) {
+    setQuery(q);
+    if (!q.trim()) { setMatchIds(null); return; }
+    const ids = await window.api.search.query(q.trim());
+    setMatchIds(ids);
+  }
 
   async function handleDelete(id: string) {
     if (!confirm(t.dashboard.deleteConfirm)) return;
@@ -73,6 +82,11 @@ export function Dashboard() {
           <p className="text-xs text-text-muted mt-0.5">{loading ? t.dashboard.loading : t.dashboard.sessions(sessions.length)}</p>
         </div>
         <div className="flex gap-2">
+          <input
+            type="search" value={query} placeholder={t.dashboard.search}
+            onChange={e => handleSearch(e.target.value)}
+            className="px-3 py-1.5 text-sm bg-surface border border-border rounded-lg text-text-primary placeholder-text-muted/50 focus:outline-none focus:border-accent w-52 transition-colors"
+          />
           <button onClick={() => navigate('/session/import')}
             className="flex items-center gap-2 px-3.5 py-2 bg-surface-2 hover:bg-surface border border-border text-text-primary rounded-lg text-sm transition-colors">
             {t.dashboard.importFile}
@@ -87,16 +101,21 @@ export function Dashboard() {
       <div className="flex-1 overflow-y-auto p-6">
         {loading ? <Skeleton /> : sessions.length === 0 ? (
           <EmptyState onNew={() => navigate('/session/setup')} onImport={() => navigate('/session/import')} />
-        ) : (
-          <div className="space-y-2 max-w-3xl">
-            {sessions.map(s => (
-              <SessionCard key={s.id} session={s}
-                onOpen={() => navigate(getSessionRoute(s))}
-                onDelete={() => handleDelete(s.id)}
-              />
-            ))}
-          </div>
-        )}
+        ) : (() => {
+          const displayed = matchIds ? sessions.filter(s => matchIds.includes(s.id)) : sessions;
+          return displayed.length === 0 ? (
+            <p className="text-sm text-text-muted py-8 text-center">{t.dashboard.noResults}</p>
+          ) : (
+            <div className="space-y-2 max-w-3xl">
+              {displayed.map(s => (
+                <SessionCard key={s.id} session={s}
+                  onOpen={() => navigate(getSessionRoute(s))}
+                  onDelete={() => handleDelete(s.id)}
+                />
+              ))}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

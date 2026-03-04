@@ -9,6 +9,7 @@ export interface Locale {
     sessions: (n: number) => string;
     newMeeting: string; importFile: string; emptyTitle: string; emptyHint: string; deleteConfirm: string;
     diskWarn: string; diskBlock: string; diskFree: string;
+    search: string; noResults: string;
   };
   setup: {
     title: string; titleLabel: string; inputLang: string;
@@ -66,6 +67,7 @@ const ja: Locale = {
     diskWarn: 'ディスク容量が少なくなっています',
     diskBlock: 'ディスク容量不足のためインポートできません',
     diskFree: '空き',
+    search: 'ミーティングを検索…', noResults: '一致するミーティングがありません',
   },
   setup: {
     title: '新しいミーティング', titleLabel: 'タイトル',
@@ -132,6 +134,7 @@ const en: Locale = {
     diskWarn: 'Low disk space',
     diskBlock: 'Not enough disk space to import',
     diskFree: 'free',
+    search: 'Search meetings…', noResults: 'No matching meetings',
   },
   setup: {
     title: 'New Meeting', titleLabel: 'Title',
@@ -198,6 +201,7 @@ const vi: Locale = {
     diskWarn: 'Dung lượng đĩa thấp',
     diskBlock: 'Không đủ dung lượng để import',
     diskFree: 'trống',
+    search: 'Tìm kiếm cuộc họp…', noResults: 'Không tìm thấy cuộc họp',
   },
   setup: {
     title: 'Cuộc họp mới', titleLabel: 'Tiêu đề',

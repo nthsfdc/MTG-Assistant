@@ -4,6 +4,7 @@ import { fileStore } from '../store/file.store';
 import { pipelineLock } from '../utils/pipeline-lock';
 import { logger } from '../utils/logger';
 import { killFfmpeg } from './media.service';
+import { searchIndexService } from './search-index.service';
 import type { LangCode, InputType, PipelineStep, PipelineState, TranscriptSegment, NormalizedSegment, MeetingMinutes } from '../../shared/types';
 
 const STEPS_RECORDING: PipelineStep[] = ['batch_stt', 'lang_detect', 'normalizing', 'summarizing', 'exporting'];
@@ -96,6 +97,12 @@ class PostMeetingService {
         writeCheckpoint(sessionId, steps, step, 'done');
         logger.info('[Pipeline] step done', { sessionId, step, durationMs });
       }
+
+      // Build search index after all steps complete (non-fatal if it fails)
+      const session  = sessionStore.get(sessionId);
+      const minutes  = fileStore.readJson<MeetingMinutes>(sessionId, 'minutes.json');
+      const segments = fileStore.readJsonl<TranscriptSegment>(sessionId, 'transcript.jsonl');
+      searchIndexService.build(sessionId, session?.title ?? '', minutes, segments);
 
       sessionStore.update(sessionId, { status: 'done' });
       const exportPath = fileStore.sessionFile(sessionId, 'export.md');

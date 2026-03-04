@@ -78,6 +78,11 @@ const api = {
       ipcRenderer.invoke('storage:runCleanup') as Promise<void>,
   },
 
+  search: {
+    query: (query: string) =>
+      ipcRenderer.invoke('search:query', { query }) as Promise<string[]>,
+  },
+
   on: {
     sessionStatus:  (cb: (e: SessionStatusEvent)  => void): Unsub => sub('session:status',  cb),
     sessionDone:    (cb: (e: SessionDoneEvent)     => void): Unsub => sub('session:done',    cb),

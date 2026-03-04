@@ -5,6 +5,7 @@ import { registerAudioIpc }    from './ipc/audio.ipc';
 import { registerSettingsIpc, initStorageRoot, getSettings } from './ipc/settings.ipc';
 import { registerExportIpc }   from './ipc/export.ipc';
 import { registerStorageIpc }  from './ipc/storage.ipc';
+import { registerSearchIpc }   from './ipc/search.ipc';
 import { diskMonitor }         from './utils/disk-monitor';
 import { autoCleanupService }  from './services/auto-cleanup.service';
 import { sessionStore }        from './store/session.store';
@@ -53,6 +54,7 @@ function createWindow(): void {
   registerAudioIpc();
   registerExportIpc();
   registerStorageIpc();
+  registerSearchIpc();
 
   // Start background services
   diskMonitor.start(win);
