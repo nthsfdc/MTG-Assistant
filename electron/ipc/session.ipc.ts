@@ -105,7 +105,7 @@ export function registerSessionIpc(win: BrowserWindow): void {
       errorMsg: s.errorMsg,
       segments:   fileStore.readJsonl<TranscriptSegment>(sessionId, 'transcript.jsonl'),
       normalized: fileStore.readJson<NormalizedSegment[]>(sessionId, 'normalized.json'),
-      minutes:    fileStore.readJson(sessionId, 'minutes.json'),
+      minutes:    fileStore.readNormalizedMinutes(sessionId),
       pipeline:   fileStore.readPipeline(sessionId),
     };
   });

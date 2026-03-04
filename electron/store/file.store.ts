@@ -85,6 +85,24 @@ export const fileStore = {
   },
 
   /**
+   * Read minutes.json with backward-compat normalization.
+   * Old sessions stored decisions as string[] — convert to DecisionItem[] on read.
+   */
+  readNormalizedMinutes(id: string) {
+    const m = this.readJson<{
+      sessionId: string; generatedAt: number; language: string;
+      data?: { decisions?: unknown[]; [k: string]: unknown };
+    }>(id, 'minutes.json');
+    if (!m?.data) return m;
+    if (Array.isArray(m.data.decisions)) {
+      m.data.decisions = m.data.decisions.map((d: unknown) =>
+        typeof d === 'string' ? { text: d } : d,
+      );
+    }
+    return m;
+  },
+
+  /**
    * Strict validation of transcript.jsonl.
    * Every line must parse as JSON and contain text:string, startMs:number, endMs:number.
    * Returns false if file is missing, empty, or any line is malformed.

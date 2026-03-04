@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { StatusBadge } from '../components/StatusBadge';
 import { PipelineProgress } from '../components/PipelineProgress';
-import type { SessionDetail, NormalizedSegment, TodoItem, LangCode, PipelineStep } from '../../../shared/types';
+import type { SessionDetail, NormalizedSegment, TodoItem, DecisionItem, LangCode, PipelineStep } from '../../../shared/types';
 import { useT } from '../i18n';
 
 type Tab = 'overview' | 'transcript' | 'minutes' | 'todos';
@@ -218,8 +218,16 @@ export function PostMeeting() {
             {m.decisions.length > 0 && (
               <div>
                 <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.decisions}</h3>
-                <ul className="space-y-1.5">{m.decisions.map((d, i) => (
-                  <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-accent mt-0.5">✓</span>{d}</li>
+                <ul className="space-y-1.5">{m.decisions.map((d: DecisionItem, i: number) => (
+                  <li key={i} className="flex gap-2 text-sm text-text-dim">
+                    <span className="text-accent mt-0.5 flex-shrink-0">✓</span>
+                    <span>
+                      {d.text}
+                      {d.source_time && (
+                        <span className="block text-xs text-text-muted font-mono mt-0.5">└ {d.source_time}</span>
+                      )}
+                    </span>
+                  </li>
                 ))}</ul>
               </div>
             )}
@@ -323,7 +331,12 @@ export function PostMeeting() {
                         <td className="py-2.5 pr-4">
                           <div className="flex items-center gap-2">
                             <PriorityBadge p={todo.priority} />
-                            <span className={`text-text-primary ${done ? 'line-through' : ''}`}>{todo.task}</span>
+                            <span>
+                              <span className={`text-text-primary ${done ? 'line-through' : ''}`}>{todo.task}</span>
+                              {todo.source_time && (
+                                <span className="block text-xs text-text-muted font-mono mt-0.5">└ {todo.source_time}</span>
+                              )}
+                            </span>
                           </div>
                         </td>
                         <td className={`py-2.5 pr-4 text-text-dim ${done ? 'line-through' : ''}`}>

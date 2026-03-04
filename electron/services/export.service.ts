@@ -17,7 +17,7 @@ class ExportService {
     const m = input.minutes?.data;
     if (m) {
       lines.push('## 目的', '', m.purpose, '');
-      if (m.decisions.length)    { lines.push('## 決定事項', ''); m.decisions.forEach(d => lines.push(`- ${d}`)); lines.push(''); }
+      if (m.decisions.length)    { lines.push('## 決定事項', ''); m.decisions.forEach(d => lines.push(`- ${d.text}${d.source_time ? ` (${d.source_time})` : ''}`)); lines.push(''); }
       if (m.todos.length)        {
         lines.push('## Todo', '', '| タスク | 担当者 | 期限 | 優先度 |', '|--------|--------|------|--------|');
         m.todos.forEach(t => lines.push(`| ${t.task} | ${t.assignee ?? '—'} | ${t.deadline ?? '—'} | ${t.priority} |`));

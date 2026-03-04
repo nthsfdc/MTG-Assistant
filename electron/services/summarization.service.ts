@@ -1,7 +1,7 @@
 import { secretStore } from '../store/secret.store';
 import { retry } from '../utils/retry';
 import { logger } from '../utils/logger';
-import type { NormalizedSegment, MeetingMinutes, MinutesData, LangCode } from '../../shared/types';
+import type { NormalizedSegment, MeetingMinutes, MinutesData, DecisionItem, LangCode } from '../../shared/types';
 
 /** Rough token estimate: 1 token ≈ 4 characters. */
 function estimateTokens(text: string): number { return Math.ceil(text.length / 4); }
@@ -118,13 +118,18 @@ class SummarizationService {
 
   private _parseMinutes(json: string, _langName: string): MinutesData {
     try {
-      const raw = JSON.parse(json) as Partial<MinutesData>;
+      const raw = JSON.parse(json) as Record<string, unknown>;
+      // decisions: GPT returns string[] — normalize to DecisionItem[] for type safety
+      const rawDecisions = Array.isArray(raw.decisions) ? raw.decisions as (string | DecisionItem)[] : [];
+      const decisions: DecisionItem[] = rawDecisions.map(d =>
+        typeof d === 'string' ? { text: d } : d,
+      );
       return {
-        purpose:      raw.purpose      ?? FALLBACK.en,
-        decisions:    Array.isArray(raw.decisions)    ? raw.decisions    : [],
-        todos:        Array.isArray(raw.todos)        ? raw.todos        : [],
-        concerns:     Array.isArray(raw.concerns)     ? raw.concerns     : [],
-        next_actions: Array.isArray(raw.next_actions) ? raw.next_actions : [],
+        purpose:      typeof raw.purpose === 'string' ? raw.purpose : FALLBACK.en,
+        decisions,
+        todos:        Array.isArray(raw.todos)        ? raw.todos as MinutesData['todos']        : [],
+        concerns:     Array.isArray(raw.concerns)     ? raw.concerns as string[]     : [],
+        next_actions: Array.isArray(raw.next_actions) ? raw.next_actions as string[] : [],
       };
     } catch { return fallbackData('en'); }
   }

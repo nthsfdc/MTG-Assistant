@@ -10,6 +10,24 @@ import type { LangCode, InputType, PipelineStep, PipelineState, TranscriptSegmen
 const STEPS_RECORDING: PipelineStep[] = ['batch_stt', 'lang_detect', 'normalizing', 'summarizing', 'exporting'];
 const STEPS_IMPORT:    PipelineStep[] = ['prepare_audio', 'batch_stt', 'lang_detect', 'normalizing', 'summarizing', 'exporting'];
 
+/** Match `text` against transcript segments by word overlap (≥30%) → return "MM:SS" timestamp. */
+function matchTimestamp(text: string, segments: TranscriptSegment[]): string | undefined {
+  if (!text || segments.length === 0) return undefined;
+  const words = text.toLowerCase().split(/[\s\W]+/).filter(w => w.length > 1);
+  if (words.length === 0) return undefined;
+  let bestScore = 0;
+  let bestMs: number | undefined;
+  for (const seg of segments) {
+    const segWords = seg.text.toLowerCase().split(/[\s\W]+/).filter(w => w.length > 1);
+    const overlap  = words.filter(w => segWords.includes(w)).length;
+    const score    = overlap / words.length;
+    if (score > bestScore && score >= 0.3) { bestScore = score; bestMs = seg.startMs; }
+  }
+  if (bestMs === undefined) return undefined;
+  const s = Math.floor(bestMs / 1000);
+  return `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
+}
+
 function notify(win: BrowserWindow, sessionId: string, detail: string): void {
   if (!win.isDestroyed()) win.webContents.send('session:status', { sessionId, status: 'processing', detail });
 }
@@ -162,6 +180,14 @@ class PostMeetingService {
         const session    = sessionStore.get(sessionId);
         const normalized = fileStore.readJson<NormalizedSegment[]>(sessionId, 'normalized.json') ?? [];
         const minutes    = await summarizationService.summarize(normalized, sessionId, (session?.lang as LangCode) ?? lang);
+        // Attach source timestamps to decisions and todos (no extra AI calls — word overlap match)
+        const segments   = fileStore.readJsonl<TranscriptSegment>(sessionId, 'transcript.jsonl');
+        minutes.data.decisions = minutes.data.decisions.map(d => ({
+          ...d, source_time: matchTimestamp(d.text, segments) ?? d.source_time,
+        }));
+        minutes.data.todos = minutes.data.todos.map(t => ({
+          ...t, source_time: matchTimestamp(t.task, segments) ?? t.source_time,
+        }));
         fileStore.writeJson(sessionId, 'minutes.json', minutes);
         break;
       }

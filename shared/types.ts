@@ -42,16 +42,22 @@ export interface NormalizedSegment {
   method: 'rule' | 'llm';
 }
 
+export interface DecisionItem {
+  text: string;
+  source_time?: string; // e.g. "00:42"
+}
+
 export interface TodoItem {
   task: string;
   assignee: string | null;
   deadline: string | null;
   priority: 'high' | 'medium' | 'low';
+  source_time?: string; // e.g. "01:12"
 }
 
 export interface MinutesData {
   purpose: string;
-  decisions: string[];
+  decisions: DecisionItem[];
   todos: TodoItem[];
   concerns: string[];
   next_actions: string[];
