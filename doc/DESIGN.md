@@ -280,28 +280,34 @@ Whisper-1 has a hard **25 MB file size limit** and degrades above ~30 minutes of
 1. stat(audio.wav) → wavFileSizeBytes
    if wavFileSizeBytes <= 24_000_000: single-upload path (see below)
 
-2. Divide into N × 15-minute segments using ffmpeg:
-     ffmpeg -i audio.wav -f segment -segment_time 900
-            -c copy sessions/{id}/chunks/chunk_%03d.wav
+2. Compute size-safe chunk duration:
+     SAFE_UPLOAD_BYTES = 23 * 1024 * 1024  // 23 MiB
+     PCM16_16K_MONO_BYTES_PER_SEC = 32_000
+     chunkSec = clamp(floor(SAFE_UPLOAD_BYTES / PCM16_16K_MONO_BYTES_PER_SEC), 60, 900)
+              = 753 s  (each chunk ≤ 22.98 MiB, safely under Whisper's 25 MiB limit)
+
+3. Divide into N segments using ffmpeg:
+     ffmpeg -i audio.wav -f segment -segment_time {chunkSec}
+            -c copy tmpdir/chunk_%03d.wav
    (stream-copy, no re-encode — fast, no quality loss)
 
-3. Transcribe each chunk sequentially:
-     chunk_000.wav → TranscriptSegment[]  (offset = 0ms)
-     chunk_001.wav → TranscriptSegment[]  (offset = 900_000ms)
-     chunk_002.wav → TranscriptSegment[]  (offset = 1_800_000ms)
+4. Transcribe each chunk sequentially:
+     chunk_000.wav → TranscriptSegment[]  (offset = 0 ms)
+     chunk_001.wav → TranscriptSegment[]  (offset = chunkSec × 1 × 1000 ms)
+     chunk_002.wav → TranscriptSegment[]  (offset = chunkSec × 2 × 1000 ms)
 
-4. Apply offset to every segment:
-     segment.startMs += chunkIndex * CHUNK_DURATION_MS
-     segment.endMs   += chunkIndex * CHUNK_DURATION_MS
+5. Apply offset to every segment:
+     segment.startMs += chunkIndex * chunkSec * 1000
+     segment.endMs   += chunkIndex * chunkSec * 1000
 
-5. Deduplicate overlap segments (optional guard — see below)
+6. Deduplicate overlap segments (optional guard — see below)
 
-6. Merge all segment arrays → single TranscriptSegment[]
+7. Merge all segment arrays → single TranscriptSegment[]
 
-7. Delete chunks/ directory after merge
+8. Delete tmp chunks directory after merge
 ```
 
-**Memory usage**: each chunk is read as a stream for upload; the merged segment array is the only in-memory structure. Peak RAM ≈ single chunk size (~15 MB WAV slice) + segment JSON.
+**Memory usage**: each chunk is read as a stream for upload; the merged segment array is the only in-memory structure. Peak RAM ≈ single chunk size (~23 MiB WAV slice) + segment JSON.
 
 **API retry policy**: Each Whisper API call is wrapped in an exponential backoff retry loop. See §17.2.
 
@@ -324,7 +330,7 @@ Non-retryable errors: HTTP 400, 401, 413 (bad request, auth, file too large) →
 
 **Deduplication (optional guard)**:
 
-Chunks are created with **no audio overlap** (ffmpeg segment muxer, stream-copy). Because cuts happen at exact 15-minute boundaries, boundary-crossing words may be split between two chunks, but genuine duplicate segments do not occur in normal operation. Deduplication is therefore an **optional defensive guard** against unusual Whisper output, not a required pipeline step:
+Chunks are created with **no audio overlap** (ffmpeg segment muxer, stream-copy). Because cuts happen at exact chunk boundaries, boundary-crossing words may be split between two chunks, but genuine duplicate segments do not occur in normal operation. Deduplication is therefore an **optional defensive guard** against unusual Whisper output, not a required pipeline step:
 
 ```
 After merging all offset-adjusted segments into a flat array,
@@ -1415,24 +1421,35 @@ else:                              single upload
 
 For recording sessions, `audio.pcm` is converted to WAV in-memory (RIFF header prepended) before the size check is applied.
 
+#### Chunk duration (size-safe)
+
+```
+SAFE_UPLOAD_BYTES          = 23 * 1024 * 1024   // 23 MiB
+PCM16_16K_MONO_BYTES_PER_SEC = 32_000           // 16000 × 1 ch × 2 bytes
+chunkSec = clamp(floor(23*1024*1024 / 32_000), 60, 900) = 753 s
+max chunk size = 753 × 32_000 = 24,096,000 bytes ≈ 22.98 MiB  (under 25 MiB limit)
+```
+
+Fallback: if any chunk still exceeds `MAX_UPLOAD_BYTES` (25 MiB) after ffmpeg (e.g., unusual audio format), re-chunk at 300 s (9.15 MiB per chunk, always safe).
+
 #### Chunk storage lifecycle
 
 ```
-{storageRoot}/sessions/{id}/chunks/    ← created before chunking starts
-    chunk_000.wav                      ← 15-min slice
+os.tmpdir()/mtg-chunks-{sessionId}/   ← created before chunking starts
+    chunk_000.wav                      ← size-safe slice (~22.98 MiB)
     chunk_001.wav
     ...
 ```
 
-Chunks are **transient**: deleted after segment merge and `transcript.jsonl` is written. On startup recovery: if `chunks/` exists but `transcript.jsonl` is absent or fails validation → `batch_stt` must be retried from scratch; chunks are regenerated.
+Chunks are **transient**: stored in OS temp dir, deleted after segment merge and `transcript.jsonl` is written. On startup recovery: if `transcript.jsonl` is absent or fails validation → `batch_stt` is retried from scratch; chunks are regenerated.
 
 #### Time offset merging
 
 ```
-chunkDurationMs = 15 * 60 * 1000   // 900_000 ms
+chunkSec = computed per-run (753 s for PCM16 16kHz mono)
 
 for each chunk at index i:
-  offset = i * chunkDurationMs
+  offset = i * chunkSec * 1000   // ms
   for each segment in chunkResult:
     segment.startMs += offset
     segment.endMs   += offset
@@ -1440,7 +1457,7 @@ for each chunk at index i:
 
 #### Deduplication guard (no overlap, optional)
 
-Chunks are created with **no audio overlap** — the ffmpeg segment muxer performs a stream-copy cut at exact 15-minute boundaries. Genuine duplicate segments do not occur in normal operation.
+Chunks are created with **no audio overlap** — the ffmpeg segment muxer performs a stream-copy cut at exact chunk boundaries. Genuine duplicate segments do not occur in normal operation.
 
 A **text-similarity dedup guard** runs as a defensive check after offset adjustment:
 
@@ -1461,7 +1478,7 @@ For each consecutive pair (A, B):
 | Stage | Peak RAM |
 |-------|----------|
 | ffmpeg chunking | ~10 MB (stream, no buffer) |
-| Single chunk upload | ~15 MB (WAV slice in memory for multipart) |
+| Single chunk upload | ~23 MiB (WAV slice in memory for multipart) |
 | Merged TranscriptSegment[] for 2h session | ~5–15 MB JSON |
 | Total peak | < 30 MB above baseline |
 
@@ -1744,7 +1761,7 @@ Assumptions: Whisper at $0.006/min; gpt-4o-mini at $0.15/1M in + $0.60/1M out; g
 | Guardrail | Where enforced | Value |
 |-----------|---------------|-------|
 | Max transcript chars before summarization | `PostMeetingService` | 200,000 chars |
-| Max Whisper chunk size | `BatchSttService` | 24 MB (below 25 MB API limit) |
+| Max Whisper chunk size | `BatchSttService` | 22.98 MiB (753 s × 32,000 B/s; safely below 25 MiB API limit) |
 | Max GPT tokens per normalization batch | `NormalizationService` | 20 segments / call |
 | Max GPT tokens per summarization chunk | `SummarizationService` | 8,000 tokens input |
 | Max GPT tokens for final summary input | `SummarizationService` | 12,000 tokens (else extra reduction pass) |

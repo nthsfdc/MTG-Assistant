@@ -116,10 +116,12 @@ class MediaService {
   }
 
   /**
-   * Split a WAV into 15-min chunks using ffmpeg segment muxer.
+   * Split a WAV into chunks using ffmpeg segment muxer.
+   * chunkSec should be computed from SAFE_UPLOAD_BYTES / bytesPerSec to stay under
+   * the Whisper 25 MiB upload limit (caller is responsible for passing a safe value).
    * Returns array of { path, offsetSec } for each chunk.
    */
-  async chunkWav(wavPath: string, tmpDir: string, chunkSec = 900): Promise<{ path: string; offsetSec: number }[]> {
+  async chunkWav(wavPath: string, tmpDir: string, chunkSec: number): Promise<{ path: string; offsetSec: number }[]> {
     fs.mkdirSync(tmpDir, { recursive: true });
     const pattern = path.join(tmpDir, 'chunk_%03d.wav');
     await runFfmpeg([
