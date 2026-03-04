@@ -36,14 +36,14 @@ export function Layout({ children }: { children: ReactNode }) {
           <NavItem to="/settings" icon="⚙️" label={t.nav.settings} />
         </nav>
         {sessionId && (
-          <NavLink to={`/session/${sessionId}/live`}
+          <NavLink to={`/session/${sessionId}/rec`}
             className="mx-2 mb-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 hover:bg-red-500/15 transition-colors flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
             <span className="text-xs text-red-400 font-mono tabular-nums">{elapsed_str}</span>
             <span className="text-xs text-red-400/70 ml-auto">●REC</span>
           </NavLink>
         )}
-        <div className="px-4 py-3 text-xs text-text-muted border-t border-border">v1.0.0</div>
+        <div className="px-4 py-3 text-xs text-text-muted border-t border-border">v1.4.0</div>
       </aside>
       <main className="flex-1 overflow-hidden flex flex-col">{children}</main>
     </div>

@@ -1,9 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   StartSessionPayload, StartSessionResult,
-  SessionMeta, SessionDetail, AppSettings,
-  SttPartialEvent, SttFinalEvent, TranslationEvent,
-  SessionStatusEvent, SessionDoneEvent, ErrorEvent,
+  ImportPayload, MediaProbeResult,
+  SessionMeta, SessionDetail, AppSettings, StorageStats,
+  SessionStatusEvent, SessionDoneEvent, ErrorEvent, StorageWarningEvent,
+  PipelineStep,
 } from '../shared/types';
 
 type Unsub = () => void;
@@ -16,21 +17,32 @@ function sub<T>(channel: string, cb: (e: T) => void): Unsub {
 
 const api = {
   session: {
-    start: (p: StartSessionPayload) =>
+    start:           (p: StartSessionPayload) =>
       ipcRenderer.invoke('session:start', p) as Promise<StartSessionResult>,
-    stop: (sessionId: string) =>
+    stop:            (sessionId: string) =>
       ipcRenderer.invoke('session:stop', { sessionId }) as Promise<void>,
-    list: () =>
+    list:            () =>
       ipcRenderer.invoke('session:list') as Promise<SessionMeta[]>,
-    get: (sessionId: string) =>
-      ipcRenderer.invoke('session:get', { sessionId }) as Promise<SessionDetail>,
-    delete: (sessionId: string) =>
+    get:             (sessionId: string) =>
+      ipcRenderer.invoke('session:get', { sessionId }) as Promise<SessionDetail | null>,
+    delete:          (sessionId: string) =>
       ipcRenderer.invoke('session:delete', { sessionId }) as Promise<void>,
+    import:          (p: ImportPayload) =>
+      ipcRenderer.invoke('session:import', p) as Promise<StartSessionResult>,
+    retryStep:       (sessionId: string, step: PipelineStep) =>
+      ipcRenderer.invoke('session:retryStep', { sessionId, step }) as Promise<void>,
+    resumePipeline:  (sessionId: string) =>
+      ipcRenderer.invoke('session:resumePipeline', { sessionId }) as Promise<void>,
   },
 
   audio: {
     chunk: (seq: number, pcm: ArrayBuffer) =>
       ipcRenderer.send('audio:chunk', { seq, pcm }),
+  },
+
+  media: {
+    probe: (filePath: string) =>
+      ipcRenderer.invoke('media:probe', { filePath }) as Promise<MediaProbeResult>,
   },
 
   export: {
@@ -39,28 +51,37 @@ const api = {
   },
 
   settings: {
-    get: () =>
+    get:  () =>
       ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
     save: (patch: Partial<AppSettings>) =>
       ipcRenderer.invoke('settings:save', patch) as Promise<void>,
   },
 
   apikey: {
-    set: (service: 'deepgram' | 'openai' | 'deepl', key: string) =>
-      ipcRenderer.invoke('apikey:set', { service, key }) as Promise<void>,
-    exists: (service: 'deepgram' | 'openai' | 'deepl') =>
-      ipcRenderer.invoke('apikey:exists', { service }) as Promise<boolean>,
-    get: (service: 'deepgram' | 'openai' | 'deepl') =>
-      ipcRenderer.invoke('apikey:get', { service }) as Promise<string | null>,
+    set:       (service: string, key: string) =>
+      ipcRenderer.invoke('apikey:set',       { service, key }) as Promise<void>,
+    exists:    (service: string) =>
+      ipcRenderer.invoke('apikey:exists',    { service }) as Promise<boolean>,
+    getMasked: (service: string) =>
+      ipcRenderer.invoke('apikey:getMasked', { service }) as Promise<string>,
+    // apikey.get intentionally omitted — renderer must never receive raw API keys
+  },
+
+  storage: {
+    getStats:   () =>
+      ipcRenderer.invoke('storage:getStats') as Promise<StorageStats>,
+    setRoot:    (rootPath: string) =>
+      ipcRenderer.invoke('storage:setRoot', { rootPath }) as Promise<void>,
+    runCleanup: () =>
+      ipcRenderer.invoke('storage:runCleanup') as Promise<void>,
   },
 
   on: {
-    sttPartial:    (cb: (e: SttPartialEvent) => void): Unsub    => sub('stt:partial', cb),
-    sttFinal:      (cb: (e: SttFinalEvent) => void): Unsub      => sub('stt:final', cb),
-    translation:   (cb: (e: TranslationEvent) => void): Unsub   => sub('translation', cb),
-    sessionStatus: (cb: (e: SessionStatusEvent) => void): Unsub => sub('session:status', cb),
-    sessionDone:   (cb: (e: SessionDoneEvent) => void): Unsub   => sub('session:done', cb),
-    error:         (cb: (e: ErrorEvent) => void): Unsub         => sub('error', cb),
+    sessionStatus:  (cb: (e: SessionStatusEvent)  => void): Unsub => sub('session:status',  cb),
+    sessionDone:    (cb: (e: SessionDoneEvent)     => void): Unsub => sub('session:done',    cb),
+    error:          (cb: (e: ErrorEvent)           => void): Unsub => sub('error',           cb),
+    storageWarning: (cb: (e: StorageWarningEvent)  => void): Unsub => sub('storage:warning', cb),
+    // sttPartial / sttFinal / translation intentionally removed (batch-only)
   },
 };
 

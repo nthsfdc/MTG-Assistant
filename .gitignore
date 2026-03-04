@@ -13,3 +13,8 @@ release/
 # Secrets / env
 .env
 .env.*
+
+# IDE / tool caches
+.claude/
+.vs/
+mtg-assistant.zip

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { StatusBadge } from '../components/StatusBadge';
-import type { SessionDetail, NormalizedSegment, TodoItem, LangCode } from '../../../shared/types';
+import { PipelineProgress } from '../components/PipelineProgress';
+import type { SessionDetail, NormalizedSegment, TodoItem, LangCode, PipelineStep } from '../../../shared/types';
 import { useT } from '../i18n';
 
 type Tab = 'overview' | 'transcript' | 'minutes' | 'todos';
@@ -17,15 +18,13 @@ type MergedBlock = {
 };
 
 const JA_PUNCT = /[。！？…]$/;
-const INNER_SPACE_JA = /\s+(?=[をがはにへのでもとや])/g; // space before particles
-
 const JA_PARTICLE_START = /^[をがはにへのでもとや]/;
 const JA_MID_END = /[をがはにへのでもとやてにをがはにへのでもとや]$/;
+const INNER_SPACE_JA = /\s+(?=[をがはにへのでもとや])/g;
 
 function joinJa(prev: string, next: string): string {
   const trimmedPrev = prev.trimEnd();
   const trimmedNext = next.trimStart();
-  // Mid-sentence: prev ends with particle/connector OR next starts with particle
   if (JA_MID_END.test(trimmedPrev) || JA_PARTICLE_START.test(trimmedNext))
     return trimmedPrev + trimmedNext;
   const base = JA_PUNCT.test(trimmedPrev) ? trimmedPrev : trimmedPrev + '。';
@@ -59,7 +58,6 @@ function mergeConsecutive(segs: NormalizedSegment[]): MergedBlock[] {
       out.push({ speakerId: seg.speakerId, normalizedText: norm, originalText: seg.originalText, hasLlm: seg.method === 'llm', detectedLang: lang });
     }
   }
-  // Final pass: remove stray spaces inside Japanese blocks
   for (const blk of out) {
     if (blk.detectedLang === 'ja') blk.normalizedText = cleanJa(blk.normalizedText);
   }
@@ -78,20 +76,27 @@ export function PostMeeting() {
   const navigate = useNavigate();
   const [detail,    setDetail]    = useState<SessionDetail | null>(null);
   const [tab,       setTab]       = useState<Tab>('overview');
-  const [statusMsg, setStatusMsg] = useState('');
   const [exporting, setExporting] = useState(false);
   const [checked,   setChecked]   = useState<Set<number>>(new Set());
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  async function load() {
+    if (!sessionId) return;
+    const d = await window.api.session.get(sessionId);
+    setDetail(d);
+    if (d?.status === 'processing') {
+      pollRef.current = setTimeout(load, 3000);
+    }
+  }
+
   useEffect(() => {
     if (!sessionId) return;
-    const load = async () => {
-      const d = await window.api.session.get(sessionId);
-      setDetail(d);
-      if (d?.status === 'processing') pollRef.current = setTimeout(load, 3000);
-    };
-    const unsub = window.api.on.sessionStatus(e => { if (e.sessionId === sessionId) setStatusMsg(e.detail ?? ''); });
     load();
+    const unsub = window.api.on.sessionStatus(e => {
+      if (e.sessionId === sessionId && (e.status === 'done' || e.status === 'error' || e.status === 'error_recoverable')) {
+        void load();
+      }
+    });
     return () => { if (pollRef.current) clearTimeout(pollRef.current); unsub(); };
   }, [sessionId]);
 
@@ -101,6 +106,18 @@ export function PostMeeting() {
     try { await window.api.export.markdown(sessionId); } finally { setExporting(false); }
   }
 
+  async function handleRetry(step: PipelineStep) {
+    if (!sessionId) return;
+    await window.api.session.retryStep(sessionId, step);
+    void load();
+  }
+
+  async function handleResume() {
+    if (!sessionId) return;
+    await window.api.session.resumePipeline(sessionId);
+    void load();
+  }
+
   if (!detail) return (
     <div className="flex items-center justify-center h-full text-text-muted">
       <div className="text-center"><p className="text-2xl mb-2 animate-pulse">⟳</p><p className="text-sm">{t.post.loading}</p></div>
@@ -108,12 +125,15 @@ export function PostMeeting() {
   );
 
   const isProcessing = detail.status === 'processing';
+  const isError = detail.status === 'error' || detail.status === 'error_recoverable';
   const m = detail.minutes?.data;
 
-  const STEPS: Record<string, string> = {
-    batch_stt: t.post.steps.batch_stt, lang_detect: t.post.steps.lang_detect,
-    normalizing: t.post.steps.normalizing, summarizing: t.post.steps.summarizing,
-    exporting: t.post.steps.exporting,
+  const TABS: Tab[] = ['overview', 'minutes', 'todos', 'transcript'];
+  const tabLabels: Record<Tab, string> = {
+    overview:   t.post.tabs.overview,
+    transcript: t.post.tabs.transcript,
+    minutes:    t.post.tabs.minutes,
+    todos:      `${t.post.tabs.todos}${m ? ` (${m.todos.length})` : ''}`,
   };
 
   return (
@@ -124,7 +144,12 @@ export function PostMeeting() {
           <h1 className="text-base font-semibold text-text-primary truncate">{detail.title}</h1>
           <div className="flex items-center gap-3 mt-0.5">
             <StatusBadge status={detail.status} />
-            {detail.durationMs != null && <span className="text-xs text-text-muted">{t.post.duration(Math.floor(detail.durationMs / 60000))}</span>}
+            {detail.sourceFileName && (
+              <span className="text-xs text-text-muted truncate max-w-xs">{detail.sourceFileName}</span>
+            )}
+            {detail.durationMs != null && (
+              <span className="text-xs text-text-muted">{t.post.duration(Math.floor(detail.durationMs / 60000))}</span>
+            )}
           </div>
         </div>
         <button onClick={handleExport} disabled={exporting || isProcessing}
@@ -132,51 +157,84 @@ export function PostMeeting() {
           {exporting ? '…' : '↓ Markdown'}
         </button>
       </div>
-      {isProcessing && (
-        <div className="px-6 py-2.5 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-400 flex items-center gap-2">
-          <span className="animate-spin">⟳</span> {STEPS[statusMsg] ?? t.post.processing}
+
+      {(isProcessing || isError || detail.pipeline) && (
+        <div className="px-6 py-3 border-b border-border bg-surface/50">
+          <PipelineProgress
+            pipeline={detail.pipeline}
+            status={detail.status}
+            onRetry={handleRetry}
+            onResume={handleResume}
+          />
         </div>
       )}
-      {detail.status === 'error' && detail.errorMsg && (
-        <div className="px-6 py-2.5 bg-red-500/10 border-b border-red-500/20 text-xs text-red-400">{t.post.error}{detail.errorMsg}</div>
+
+      {isError && detail.errorMsg && (
+        <div className="px-6 py-2.5 bg-red-500/10 border-b border-red-500/20 text-xs text-red-400">
+          {t.post.error}{detail.errorMsg}
+        </div>
       )}
+
       <div className="flex gap-0 px-6 border-b border-border flex-shrink-0">
-        {(['minutes', 'overview', 'todos'] as Tab[]).map(tb => {
-          const labels: Record<Tab, string> = {
-            overview:   t.post.tabs.overview,
-            transcript: t.post.tabs.transcript,
-            minutes:    t.post.tabs.minutes,
-            todos:      `${t.post.tabs.todos}${m ? ` (${m.todos.length})` : ''}`,
-          };
-          return (
-            <button key={tb} onClick={() => setTab(tb)}
-              className={`px-4 py-2.5 text-sm transition-colors border-b-2 -mb-px ${tab === tb ? 'text-text-primary border-accent' : 'text-text-muted border-transparent hover:text-text-dim'}`}>
-              {labels[tb]}
-            </button>
-          );
-        })}
+        {TABS.map(tb => (
+          <button key={tb} onClick={() => setTab(tb)}
+            className={`px-4 py-2.5 text-sm transition-colors border-b-2 -mb-px ${tab === tb ? 'text-text-primary border-accent' : 'text-text-muted border-transparent hover:text-text-dim'}`}>
+            {tabLabels[tb]}
+          </button>
+        ))}
       </div>
+
       <div className="flex-1 overflow-y-auto p-6">
         {tab === 'overview' && m && (
           <div className="w-full space-y-6">
-            <div><h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.purpose}</h3><p className="text-sm text-text-dim leading-relaxed">{m.purpose}</p></div>
-            {m.decisions.length > 0 && <div><h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.decisions}</h3><ul className="space-y-1.5">{m.decisions.map((d, i) => <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-accent mt-0.5">✓</span>{d}</li>)}</ul></div>}
-            {m.concerns.length > 0 && <div><h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.concerns}</h3><ul className="space-y-1.5">{m.concerns.map((c, i) => <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-amber-400 mt-0.5">!</span>{c}</li>)}</ul></div>}
-            {m.next_actions.length > 0 && <div><h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.nextActions}</h3><ul className="space-y-1.5">{m.next_actions.map((a, i) => <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-text-muted mt-0.5">→</span>{a}</li>)}</ul></div>}
+            <div>
+              <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.purpose}</h3>
+              <p className="text-sm text-text-dim leading-relaxed">{m.purpose}</p>
+            </div>
+            {m.decisions.length > 0 && (
+              <div>
+                <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.decisions}</h3>
+                <ul className="space-y-1.5">{m.decisions.map((d, i) => (
+                  <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-accent mt-0.5">✓</span>{d}</li>
+                ))}</ul>
+              </div>
+            )}
+            {m.concerns.length > 0 && (
+              <div>
+                <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.concerns}</h3>
+                <ul className="space-y-1.5">{m.concerns.map((c, i) => (
+                  <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-amber-400 mt-0.5">!</span>{c}</li>
+                ))}</ul>
+              </div>
+            )}
+            {m.next_actions.length > 0 && (
+              <div>
+                <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.nextActions}</h3>
+                <ul className="space-y-1.5">{m.next_actions.map((a, i) => (
+                  <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-text-muted mt-0.5">→</span>{a}</li>
+                ))}</ul>
+              </div>
+            )}
           </div>
         )}
-        {tab === 'overview' && !m && <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noData}</p>}
+        {tab === 'overview' && !m && (
+          <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noData}</p>
+        )}
+
         {tab === 'transcript' && (
           <div className="w-full space-y-2">
-            {detail.segments.length === 0 ? <p className="text-sm text-text-muted">{t.post.noTranscript}</p> :
-              detail.segments.map(s => (
+            {detail.segments.length === 0
+              ? <p className="text-sm text-text-muted">{t.post.noTranscript}</p>
+              : detail.segments.map(s => (
                 <div key={s.id} className="flex gap-3">
                   <span className="text-xs text-text-muted font-mono pt-0.5 w-14 text-right flex-shrink-0">{msToTime(s.startMs)}</span>
                   <p className="text-sm text-text-dim leading-relaxed">{s.text}</p>
                 </div>
-              ))}
+              ))
+            }
           </div>
         )}
+
         {tab === 'minutes' && (
           <div className="w-full space-y-4">
             {!detail.normalized || detail.normalized.length === 0
@@ -195,6 +253,7 @@ export function PostMeeting() {
             }
           </div>
         )}
+
         {tab === 'todos' && (
           <div className="w-full">
             {!m || m.todos.length === 0 ? <p className="text-sm text-text-muted">{t.post.noTodos}</p> : (
@@ -219,22 +278,27 @@ export function PostMeeting() {
                     const done = checked.has(i);
                     const toggle = () => setChecked(s => { const n = new Set(s); done ? n.delete(i) : n.add(i); return n; });
                     return (
-                    <tr key={i} onClick={toggle} className={`border-b border-border/50 cursor-pointer transition-colors ${done ? 'opacity-40' : 'hover:bg-surface/50'}`}>
-                      <td className="py-2.5 pr-3 text-xs text-text-muted tabular-nums">{i + 1}</td>
-                      <td className="py-2.5 pr-4">
-                        <input type="checkbox" checked={done} onChange={toggle} onClick={e => e.stopPropagation()}
-                          className="w-3.5 h-3.5 rounded accent-accent cursor-pointer" />
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        <div className="flex items-center gap-2">
-                          <PriorityBadge p={todo.priority} />
-                          <span className={`text-text-primary ${done ? 'line-through' : ''}`}>{todo.task}</span>
-                        </div>
-                      </td>
-                      <td className={`py-2.5 pr-4 text-text-dim ${done ? 'line-through' : ''}`}>{todo.assignee ?? <span className="text-text-muted/40">—</span>}</td>
-                      <td className={`py-2.5 text-text-dim ${done ? 'line-through' : ''}`}>{todo.deadline ?? <span className="text-text-muted/40">—</span>}</td>
-                    </tr>
-                  );})}
+                      <tr key={i} onClick={toggle} className={`border-b border-border/50 cursor-pointer transition-colors ${done ? 'opacity-40' : 'hover:bg-surface/50'}`}>
+                        <td className="py-2.5 pr-3 text-xs text-text-muted tabular-nums">{i + 1}</td>
+                        <td className="py-2.5 pr-4">
+                          <input type="checkbox" checked={done} onChange={toggle} onClick={e => e.stopPropagation()}
+                            className="w-3.5 h-3.5 rounded accent-accent cursor-pointer" />
+                        </td>
+                        <td className="py-2.5 pr-4">
+                          <div className="flex items-center gap-2">
+                            <PriorityBadge p={todo.priority} />
+                            <span className={`text-text-primary ${done ? 'line-through' : ''}`}>{todo.task}</span>
+                          </div>
+                        </td>
+                        <td className={`py-2.5 pr-4 text-text-dim ${done ? 'line-through' : ''}`}>
+                          {todo.assignee ?? <span className="text-text-muted/40">—</span>}
+                        </td>
+                        <td className={`py-2.5 text-text-dim ${done ? 'line-through' : ''}`}>
+                          {todo.deadline ?? <span className="text-text-muted/40">—</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}

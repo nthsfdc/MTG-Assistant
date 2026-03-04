@@ -8,7 +8,6 @@ export function SessionSetup() {
   const navigate = useNavigate();
   const [title,         setTitle]         = useState('');
   const [lang,          setLang]          = useState<LangCode>('ja');
-  const [targetLang,    setTargetLang]    = useState<LangCode>('none');
   const [inputDeviceId, setInputDeviceId] = useState('');
   const [mics,          setMics]          = useState<MediaDeviceInfo[]>([]);
   const [loading,       setLoading]       = useState(false);
@@ -26,22 +25,14 @@ export function SessionSetup() {
     { value: 'multi', label: t.setup.langMulti },
   ];
 
-  const TARGET_LANGS: { value: LangCode; label: string }[] = [
-    { value: 'none', label: t.setup.noTranslation },
-    { value: 'ja',   label: '🇯🇵 日本語' },
-    { value: 'en',   label: '🇺🇸 English' },
-    { value: 'vi',   label: '🇻🇳 Tiếng Việt' },
-  ];
-
   async function handleStart() {
     if (loading) return;
-    setError('');
-    setLoading(true);
+    setError(''); setLoading(true);
     try {
       await window.api.settings.save({ inputDeviceId });
       const sessionTitle = title.trim() || new Date().toLocaleString(t.dateLocale);
-      const { sessionId } = await window.api.session.start({ title: sessionTitle, lang, targetLang });
-      navigate(`/session/${sessionId}/live`);
+      const { sessionId } = await window.api.session.start({ title: sessionTitle, lang });
+      navigate(`/session/${sessionId}/rec`);
     } catch (e) {
       setError(e instanceof Error ? e.message : t.setup.failedToStart);
       setLoading(false);
@@ -74,14 +65,9 @@ export function SessionSetup() {
               className="w-full px-3 py-2.5 bg-surface-2 border border-border rounded-lg text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-accent transition-colors"
             />
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            {sel(t.setup.inputLang, lang, v => setLang(v as LangCode),
-              INPUT_LANGS.map(l => <option key={l.value} value={l.value}>{l.label}</option>)
-            )}
-            {sel(t.setup.targetLang, targetLang, v => setTargetLang(v as LangCode),
-              TARGET_LANGS.map(l => <option key={l.value} value={l.value}>{l.label}</option>)
-            )}
-          </div>
+          {sel(t.setup.inputLang, lang, v => setLang(v as LangCode),
+            INPUT_LANGS.map(l => <option key={l.value} value={l.value}>{l.label}</option>)
+          )}
           {sel(t.settings.mic, inputDeviceId, setInputDeviceId, <>
             <option value="">{t.settings.systemDefault}</option>
             {mics.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || t.settings.micN(i + 1)}</option>)}
@@ -93,7 +79,7 @@ export function SessionSetup() {
               {t.setup.cancel}
             </button>
             <button onClick={handleStart} disabled={loading}
-              className="flex-1 py-2.5 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-medium transition-colors disabled:opacity-50">
+              className="flex-1 py-2.5 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm transition-colors disabled:opacity-50">
               {loading ? t.setup.starting : t.setup.start}
             </button>
           </div>

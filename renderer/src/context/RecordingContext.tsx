@@ -1,6 +1,5 @@
-import { createContext, useContext, useRef, useEffect, type ReactNode } from 'react';
+import { createContext, useContext, useRef, type ReactNode } from 'react';
 import { useAudioCapture }   from '../hooks/useAudioCapture';
-import { useCaptionStore }   from '../store/captionStore';
 import { useRecordingStore } from '../store/recordingStore';
 
 interface RecordingCtx {
@@ -14,27 +13,16 @@ const Ctx = createContext<RecordingCtx>({
 });
 
 export function RecordingProvider({ children }: { children: ReactNode }) {
-  const { start, stop }              = useAudioCapture();
-  const { setActive, tick, clear }   = useRecordingStore();
-  const { onPartial, onFinal, onTranslation } = useCaptionStore();
+  const { start, stop }            = useAudioCapture();
+  const { setActive, tick, clear } = useRecordingStore();
   const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const sessionIdRef = useRef<string | null>(null);
 
-  // Caption IPC subscriptions live here — persist across route changes
-  useEffect(() => {
-    const unsubs = [
-      window.api.on.sttPartial(onPartial),
-      window.api.on.sttFinal(onFinal),
-      window.api.on.translation(onTranslation),
-    ];
-    return () => unsubs.forEach(f => f());
-  }, [onPartial, onFinal, onTranslation]);
-
   async function startRecording(sessionId: string, deviceId?: string): Promise<void> {
-    if (sessionIdRef.current === sessionId) return; // already recording
+    if (sessionIdRef.current === sessionId) return;
     sessionIdRef.current = sessionId;
-    const { hasSysAudio } = await start(deviceId);
-    setActive(sessionId, hasSysAudio);
+    await start(deviceId);
+    setActive(sessionId);
     timerRef.current = setInterval(tick, 1000);
   }
 

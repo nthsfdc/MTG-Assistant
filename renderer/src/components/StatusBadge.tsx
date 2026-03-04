@@ -2,10 +2,11 @@ import type { SessionStatus } from '../../../shared/types';
 import { useT } from '../i18n';
 
 const DOT: Record<SessionStatus, { dot: string; text: string }> = {
-  recording:  { dot: 'bg-red-500 animate-pulse',   text: 'text-red-400'     },
-  processing: { dot: 'bg-amber-500 animate-pulse', text: 'text-amber-400'   },
-  done:       { dot: 'bg-emerald-500',             text: 'text-emerald-400' },
-  error:      { dot: 'bg-red-500',                 text: 'text-red-400'     },
+  recording:         { dot: 'bg-red-500 animate-pulse',   text: 'text-red-400'     },
+  processing:        { dot: 'bg-amber-500 animate-pulse', text: 'text-amber-400'   },
+  done:              { dot: 'bg-emerald-500',             text: 'text-emerald-400' },
+  error:             { dot: 'bg-red-500',                 text: 'text-red-400'     },
+  error_recoverable: { dot: 'bg-orange-500',              text: 'text-orange-400'  },
 };
 
 export function StatusBadge({ status }: { status: SessionStatus }) {

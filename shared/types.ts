@@ -1,21 +1,25 @@
-export type SessionStatus = 'recording' | 'processing' | 'done' | 'error';
-export type LangCode = 'ja' | 'vi' | 'en' | 'multi' | 'none';
+export type SessionStatus = 'recording' | 'processing' | 'done' | 'error' | 'error_recoverable';
+export type LangCode = 'ja' | 'vi' | 'en' | 'multi';
+export type InputType = 'recording' | 'import';
+export type PipelineStep = 'prepare_audio' | 'batch_stt' | 'lang_detect' | 'normalizing' | 'summarizing' | 'exporting' | 'done';
 
 export interface Session {
   id: string;
   title: string;
   status: SessionStatus;
+  inputType: InputType;
   startedAt: number;
   endedAt: number | null;
   lang: LangCode;
-  targetLang: LangCode;
   durationMs: number | null;
   errorMsg: string | null;
+  sourceFileName?: string;
+  sourceFilePath?: string; // full path (backend only — not exposed to renderer)
 }
 
 export type SessionMeta = Pick<
   Session,
-  'id' | 'title' | 'status' | 'startedAt' | 'endedAt' | 'lang' | 'durationMs'
+  'id' | 'title' | 'status' | 'inputType' | 'startedAt' | 'endedAt' | 'lang' | 'durationMs' | 'sourceFileName'
 >;
 
 export interface TranscriptSegment {
@@ -24,8 +28,7 @@ export interface TranscriptSegment {
   speakerId: string;
   text: string;
   lang: LangCode;
-  detectedLang?: LangCode; // set at capture time (realtime) or LangDetect step (post)
-  translation?: string;    // set when TranslationRouter produces a result
+  detectedLang?: LangCode;
   startMs: number;
   endMs: number;
 }
@@ -61,12 +64,19 @@ export interface MeetingMinutes {
   data: MinutesData;
 }
 
+export interface PipelineState {
+  sessionId: string;
+  steps: { name: PipelineStep; status: 'pending' | 'running' | 'done' | 'error'; completedAt?: number }[];
+  currentStep: PipelineStep;
+  error?: string;
+}
+
 export interface SessionDetail extends SessionMeta {
-  targetLang: LangCode;
   errorMsg: string | null;
   segments: TranscriptSegment[];
   normalized: NormalizedSegment[] | null;
   minutes: MeetingMinutes | null;
+  pipeline: PipelineState | null;
 }
 
 export interface AppSettings {
@@ -74,38 +84,38 @@ export interface AppSettings {
   outputDeviceId: string;
   transcriptionLanguage: string;
   uiLang: 'ja' | 'en' | 'vi';
+  storageRootPath: string;
+  autoCleanupDays: number;
+  archiveSource: boolean;
+}
+
+export interface StorageStats {
+  sessionCount: number;
+  totalBytes: number;
+  freeBytes: number;
+  storageRoot: string;
+}
+
+export interface ImportPayload {
+  title: string;
+  lang: LangCode;
+  filePath: string;
+}
+
+export interface MediaProbeResult {
+  format: string;
+  durationSec: number;
+  hasAudio: boolean;
+  fileSizeBytes: number;
 }
 
 export interface StartSessionPayload {
   title: string;
   lang: LangCode;
-  targetLang: LangCode;
 }
 
 export interface StartSessionResult {
   sessionId: string;
-}
-
-export interface SttPartialEvent {
-  sessionId: string;
-  speakerId: string;
-  text: string;
-}
-
-export interface SttFinalEvent {
-  sessionId: string;
-  speakerId: string;
-  text: string;
-  lang: LangCode;
-  startMs: number;
-  endMs: number;
-}
-
-export interface TranslationEvent {
-  sessionId: string;
-  sourceText: string;
-  translatedText: string;
-  speakerId: string;
 }
 
 export interface SessionStatusEvent {
@@ -123,4 +133,9 @@ export interface ErrorEvent {
   code: string;
   message: string;
   sessionId?: string;
+}
+
+export interface StorageWarningEvent {
+  freeBytes: number;
+  threshold: 'warn' | 'block';
 }

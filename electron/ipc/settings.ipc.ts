@@ -2,12 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import { ipcMain } from 'electron';
 import { secretStore } from '../store/secret.store';
-import { paths, ensureDir } from '../utils/paths';
+import { paths, ensureDir, setStorageRoot } from '../utils/paths';
 import type { AppSettings } from '../../shared/types';
 
 const defaults: AppSettings = {
   inputDeviceId: '', outputDeviceId: '',
   transcriptionLanguage: '', uiLang: 'ja',
+  storageRootPath: '', autoCleanupDays: 7, archiveSource: false,
 };
 
 function loadFromDisk(): AppSettings {
@@ -24,16 +25,26 @@ function saveToDisk(s: AppSettings): void {
 
 let _settings: AppSettings = loadFromDisk();
 
+export function getSettings(): AppSettings { return _settings; }
+
+export function initStorageRoot(): void {
+  if (_settings.storageRootPath) setStorageRoot(_settings.storageRootPath);
+}
+
 export function registerSettingsIpc(): void {
   ipcMain.handle('settings:get', () => _settings);
   ipcMain.handle('settings:save', (_, patch: Partial<AppSettings>) => {
+    if (patch.storageRootPath !== undefined && patch.storageRootPath !== _settings.storageRootPath) {
+      setStorageRoot(patch.storageRootPath);
+    }
     _settings = { ..._settings, ...patch };
     saveToDisk(_settings);
   });
-  ipcMain.handle('apikey:set',    (_, { service, key }: { service: string; key: string }) =>
+  ipcMain.handle('apikey:set',       (_, { service, key }: { service: string; key: string }) =>
     secretStore.set(service, key));
-  ipcMain.handle('apikey:exists', (_, { service }: { service: string }) =>
+  ipcMain.handle('apikey:exists',    (_, { service }: { service: string }) =>
     secretStore.exists(service));
-  ipcMain.handle('apikey:get',    (_, { service }: { service: string }) =>
-    secretStore.get(service));
+  ipcMain.handle('apikey:getMasked', (_, { service }: { service: string }) =>
+    secretStore.getMasked(service));
+  // apikey:get intentionally NOT registered — raw keys must never reach renderer
 }

@@ -20,4 +20,9 @@ export function registerExportIpc(): void {
     await shell.openPath(filePath);
     return { filePath };
   });
+
+  ipcMain.handle('media:probe', async (_, { filePath }: { filePath: string }) => {
+    const { mediaService } = await import('../services/media.service');
+    return mediaService.probe(filePath);
+  });
 }

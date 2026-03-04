@@ -1,15 +1,13 @@
-/**
- * Simple JSON file store — replaces better-sqlite3 (no native compilation needed).
- */
 import fs from 'fs';
+import path from 'path';
 import { paths, ensureDir } from '../utils/paths';
-import type { Session, SessionMeta } from '../../shared/types';
+import type { Session, SessionMeta, SessionStatus } from '../../shared/types';
 
-function dbPath() { return paths.db.replace('.sqlite', '.json'); }
+function dbPath() { return path.join(paths.userData, 'app.json'); }
 
 function readAll(): Session[] {
   try {
-    ensureDir(require('path').dirname(dbPath()));
+    ensureDir(path.dirname(dbPath()));
     if (!fs.existsSync(dbPath())) return [];
     return JSON.parse(fs.readFileSync(dbPath(), 'utf-8')) as Session[];
   } catch { return []; }
@@ -20,7 +18,7 @@ function writeAll(sessions: Session[]): void {
 }
 
 export const sessionStore = {
-  create(s: Pick<Session, 'id' | 'title' | 'startedAt' | 'lang' | 'targetLang'>): void {
+  create(s: Pick<Session, 'id' | 'title' | 'startedAt' | 'lang' | 'inputType' | 'sourceFileName' | 'sourceFilePath'>): void {
     const all = readAll();
     all.unshift({ ...s, status: 'recording', endedAt: null, durationMs: null, errorMsg: null });
     writeAll(all);
@@ -33,15 +31,25 @@ export const sessionStore = {
   },
 
   list(): SessionMeta[] {
-    return readAll().map(({ id, title, status, startedAt, endedAt, lang, durationMs }) =>
-      ({ id, title, status, startedAt, endedAt, lang, durationMs }));
+    return readAll().map(({ id, title, status, inputType, startedAt, endedAt, lang, durationMs, sourceFileName }) =>
+      ({ id, title, status, inputType, startedAt, endedAt, lang, durationMs, sourceFileName }));
   },
 
   get(id: string): Session | undefined {
     return readAll().find(s => s.id === id);
   },
 
+  /** Returns all sessions with status='processing' — used for crash recovery on startup. */
+  getProcessing(): Session[] {
+    return readAll().filter(s => s.status === 'processing');
+  },
+
   delete(id: string): void {
     writeAll(readAll().filter(s => s.id !== id));
+  },
+
+  markError(id: string, msg: string, recoverable = false): void {
+    const status: SessionStatus = recoverable ? 'error_recoverable' : 'error';
+    this.update(id, { status, errorMsg: msg });
   },
 };
