@@ -5,16 +5,23 @@ import { PipelineProgress } from '../components/PipelineProgress';
 import type { SessionDetail, NormalizedSegment, TodoItem, DecisionItem, LangCode, PipelineStep } from '../../../shared/types';
 import { useT } from '../i18n';
 
-type Tab = 'overview' | 'transcript' | 'minutes' | 'todos';
+type Tab = 'overview' | 'transcript' | 'todos';
 
-function msToTime(ms: number) {
-  const s = Math.floor(ms / 1000);
-  return `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
+/** Format ms as [mm:ss] or [hh:mm:ss] when >= 1h. */
+function formatMs(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0)
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
 type MergedBlock = {
   speakerId: string; normalizedText: string; originalText: string;
   hasLlm: boolean; detectedLang: LangCode | undefined;
+  startMs: number | undefined;
 };
 
 const JA_PUNCT = /[。！？…]$/;
@@ -39,7 +46,8 @@ function cleanJa(text: string): string {
   return text.replace(INNER_SPACE_JA, '').replace(/\s+/g, '');
 }
 
-function mergeConsecutive(segs: NormalizedSegment[]): MergedBlock[] {
+/** Build paragraphs from normalized segments, carrying the timestamp of the first segment in each paragraph. */
+function mergeConsecutive(segs: NormalizedSegment[], startMsById: Map<string, number>): MergedBlock[] {
   const out: MergedBlock[] = [];
   for (const seg of segs) {
     const last = out[out.length - 1];
@@ -55,7 +63,11 @@ function mergeConsecutive(segs: NormalizedSegment[]): MergedBlock[] {
     } else {
       const lang = seg.detectedLang;
       const norm = lang === 'ja' ? cleanJa(seg.normalizedText) : seg.normalizedText;
-      out.push({ speakerId: seg.speakerId, normalizedText: norm, originalText: seg.originalText, hasLlm: seg.method === 'llm', detectedLang: lang });
+      out.push({
+        speakerId: seg.speakerId, normalizedText: norm, originalText: seg.originalText,
+        hasLlm: seg.method === 'llm', detectedLang: lang,
+        startMs: startMsById.get(seg.sourceId),
+      });
     }
   }
   for (const blk of out) {
@@ -152,11 +164,13 @@ export function PostMeeting() {
   const isError = detail.status === 'error' || detail.status === 'error_recoverable';
   const m = detail.minutes?.data;
 
-  const TABS: Tab[] = ['overview', 'minutes', 'todos', 'transcript'];
+  // Build sourceId → startMs lookup from raw segments (used for timestamps only; raw text not shown)
+  const startMsById = new Map<string, number>(detail.segments.map(s => [s.id, s.startMs]));
+
+  const TABS: Tab[] = ['overview', 'transcript', 'todos'];
   const tabLabels: Record<Tab, string> = {
     overview:   t.post.tabs.overview,
     transcript: t.post.tabs.transcript,
-    minutes:    t.post.tabs.minutes,
     todos:      `${t.post.tabs.todos}${m ? ` (${m.todos.length})` : ''}`,
   };
 
@@ -254,31 +268,14 @@ export function PostMeeting() {
         )}
 
         {tab === 'transcript' && (
-          <div className="w-full space-y-2">
-            {detail.segments.length === 0
-              ? <p className="text-sm text-text-muted">{t.post.noTranscript}</p>
-              : detail.segments.map(s => (
-                <div key={s.id} className="flex gap-3">
-                  <span className="text-xs text-text-muted font-mono pt-0.5 w-14 text-right flex-shrink-0">{msToTime(s.startMs)}</span>
-                  <p className="text-sm text-text-dim leading-relaxed">{s.text}</p>
-                </div>
-              ))
-            }
-          </div>
-        )}
-
-        {tab === 'minutes' && (
-          <div className="w-full space-y-4">
+          <div className="w-full space-y-3">
             {!detail.normalized || detail.normalized.length === 0
               ? <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noTranscript}</p>
-              : mergeConsecutive(detail.normalized).map((blk, i) => (
+              : mergeConsecutive(detail.normalized, startMsById).map((blk, i) => (
                 <div key={i} className="flex gap-3">
-                  <div className="flex flex-col items-end gap-0.5 w-12 flex-shrink-0 pt-0.5">
-                    <span className="text-xs text-text-muted font-mono">{blk.speakerId.replace('speaker_', 'S')}</span>
-                    <span className={`text-[10px] px-1 py-px rounded leading-none ${blk.hasLlm ? 'text-accent bg-accent/10' : 'text-text-muted bg-surface-2'}`}>
-                      {blk.hasLlm ? 'llm' : 'rule'}
-                    </span>
-                  </div>
+                  <span className="text-xs text-text-muted font-mono pt-0.5 w-14 text-right flex-shrink-0">
+                    {blk.startMs != null ? formatMs(blk.startMs) : ''}
+                  </span>
                   <p className="text-sm text-text-primary leading-relaxed">{blk.normalizedText}</p>
                 </div>
               ))

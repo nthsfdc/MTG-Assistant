@@ -49,6 +49,15 @@ Design: v1.4.0-lite (Batch Processing Only)
 
 ---
 
+### UI Tabs Redesign (2026-03-04)
+- Tab order: 要約 / 文字起こし / Todo (3 tabs only)
+- 「議事録」 tab removed — it was a duplicate of 文字起こし with no unique value
+- 「文字起こし」 shows normalized written text (話し言葉→書き言葉), NOT raw Whisper output
+- Timestamps included in 文字起こし: `[mm:ss]` per paragraph (group by consecutive same-speaker segments); `[hh:mm:ss]` when total duration >= 1h
+- Raw transcript (`transcript.jsonl` / `detail.segments`) stays internal — used for summarization and timestamp lookup only, not rendered in UI
+
+---
+
 ## Open Questions
 
 *(none currently — add here when a decision is deferred or contested)*

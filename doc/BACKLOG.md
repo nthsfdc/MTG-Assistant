@@ -80,6 +80,49 @@ Done Criteria
 
 ---
 
+## BL-010 — Remove 議事録 tab; keep 要約 / 文字起こし / Todo
+
+Priority: P0
+Status: Done
+Files: `renderer/src/screens/PostMeeting.tsx`, `renderer/src/i18n/locales.ts`
+
+Done Criteria
+- 議事録 tab is not shown in the UI.
+- Tabs are exactly: 要約 / 文字起こし / Todo (and their i18n equivalents for en/vi).
+- `minutes` key removed from Locale.tabs interface.
+
+---
+
+## BL-011 — Implement 文字起こし as normalized written text with timestamps
+
+Priority: P0
+Status: Done
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Description
+- 文字起こし displays normalized text (話し言葉→書き言葉), not raw Whisper output.
+- Timestamps derived from `TranscriptSegment.startMs` via `sourceId` join.
+- Format: `[mm:ss]` for total < 1h; `[hh:mm:ss]` when >= 1h.
+- Granularity: paragraph (consecutive same-speaker segments grouped, timestamp at paragraph start).
+
+Done Criteria
+- 文字起こし is readable written-style text with `[mm:ss]` timestamp prefix per paragraph.
+- Raw transcript is NOT rendered anywhere in the UI.
+
+---
+
+## BL-012 — Improve normalization rules and GPT rewrite prompt (optional)
+
+Priority: P1
+Status: Todo
+Files: `electron/services/normalization.service.ts`
+
+Done Criteria
+- Phase 1 filler rules reviewed and expanded per feedback from real meetings.
+- GPT-4o-mini prompt refined to better handle mixed Japanese/English sentences.
+
+---
+
 ## BL-005 — Stable error codes + safe error messages for Batch STT failures
 
 Priority: P1

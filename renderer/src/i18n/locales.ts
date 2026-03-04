@@ -23,7 +23,7 @@ export interface Locale {
   };
   post: {
     loading: string; processing: string; error: string;
-    tabs: { overview: string; transcript: string; minutes: string; todos: string };
+    tabs: { overview: string; transcript: string; todos: string };
     steps: {
       prepare_audio: string; batch_stt: string; lang_detect: string;
       normalizing: string; summarizing: string; exporting: string;
@@ -85,7 +85,7 @@ const ja: Locale = {
   },
   post: {
     loading: '読み込み中…', processing: '処理中…', error: 'エラー: ',
-    tabs: { overview: '要約', transcript: '文字起こし', minutes: '議事録', todos: 'Todoリスト' },
+    tabs: { overview: '要約', transcript: '文字起こし', todos: 'Todo' },
     steps: {
       prepare_audio: '音声を準備中…',
       batch_stt: '音声を再認識中…', lang_detect: '言語を検出中…',
@@ -153,7 +153,7 @@ const en: Locale = {
   },
   post: {
     loading: 'Loading…', processing: 'Processing…', error: 'Error: ',
-    tabs: { overview: 'Summary', transcript: 'Transcript', minutes: 'Minutes', todos: 'Todo List' },
+    tabs: { overview: 'Summary', transcript: 'Transcript', todos: 'Todo' },
     steps: {
       prepare_audio: 'Preparing audio…',
       batch_stt: 'Re-recognizing audio…', lang_detect: 'Detecting languages…',
@@ -221,7 +221,7 @@ const vi: Locale = {
   },
   post: {
     loading: 'Đang tải…', processing: 'Đang xử lý…', error: 'Lỗi: ',
-    tabs: { overview: 'Tóm tắt', transcript: 'Bản ghi', minutes: 'Biên bản', todos: 'Todo List' },
+    tabs: { overview: 'Tóm tắt', transcript: 'Bản ghi', todos: 'Todo' },
     steps: {
       prepare_audio: 'Đang chuẩn bị âm thanh…',
       batch_stt: 'Đang nhận dạng âm thanh…', lang_detect: 'Đang phát hiện ngôn ngữ…',
