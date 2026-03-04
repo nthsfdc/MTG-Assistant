@@ -46,8 +46,10 @@ const api = {
   },
 
   export: {
-    markdown: (sessionId: string) =>
-      ipcRenderer.invoke('export:markdown', { sessionId }) as Promise<{ filePath: string }>,
+    markdown:     (sessionId: string) =>
+      ipcRenderer.invoke('export:markdown',     { sessionId }) as Promise<{ filePath: string }>,
+    todoMarkdown: (sessionId: string) =>
+      ipcRenderer.invoke('export:todoMarkdown', { sessionId }) as Promise<{ filePath: string }>,
   },
 
   settings: {

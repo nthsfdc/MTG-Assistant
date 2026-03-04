@@ -33,6 +33,7 @@ export interface Locale {
     priority: { high: string; medium: string; low: string };
     todoCol: { task: string; assignee: string; deadline: string };
     retryStep: string; resumePipeline: string;
+    todoCopy: string; todoCopied: string; todoExport: string;
   };
   status: { recording: string; processing: string; done: string; error: string; error_recoverable: string };
   card: { delete: string; duration: (m: number, s: number) => string };
@@ -94,6 +95,7 @@ const ja: Locale = {
     priority: { high: '高', medium: '中', low: '低' },
     todoCol: { task: 'タスク', assignee: '担当者', deadline: '期限' },
     retryStep: '再試行', resumePipeline: 'パイプラインを再開',
+    todoCopy: 'コピー', todoCopied: 'コピーしました！', todoExport: 'Markdownで保存',
   },
   status: { recording: '録音中', processing: '処理中', done: '完了', error: 'エラー', error_recoverable: '再試行可能' },
   card: {
@@ -159,6 +161,7 @@ const en: Locale = {
     priority: { high: 'High', medium: 'Medium', low: 'Low' },
     todoCol: { task: 'Task', assignee: 'Assignee', deadline: 'Deadline' },
     retryStep: 'Retry', resumePipeline: 'Resume Pipeline',
+    todoCopy: 'Copy', todoCopied: 'Copied!', todoExport: 'Save as Markdown',
   },
   status: { recording: 'Recording', processing: 'Processing', done: 'Done', error: 'Error', error_recoverable: 'Retryable' },
   card: {
@@ -224,6 +227,7 @@ const vi: Locale = {
     priority: { high: 'Cao', medium: 'Trung bình', low: 'Thấp' },
     todoCol: { task: 'Nhiệm vụ', assignee: 'Người thực hiện', deadline: 'Hạn chót' },
     retryStep: 'Thử lại', resumePipeline: 'Tiếp tục pipeline',
+    todoCopy: 'Sao chép', todoCopied: 'Đã sao chép!', todoExport: 'Lưu Markdown',
   },
   status: { recording: 'Đang ghi', processing: 'Đang xử lý', done: 'Hoàn thành', error: 'Lỗi', error_recoverable: 'Có thể thử lại' },
   card: {

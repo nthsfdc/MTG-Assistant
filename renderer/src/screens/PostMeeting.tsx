@@ -76,8 +76,10 @@ export function PostMeeting() {
   const navigate = useNavigate();
   const [detail,    setDetail]    = useState<SessionDetail | null>(null);
   const [tab,       setTab]       = useState<Tab>('overview');
-  const [exporting, setExporting] = useState(false);
-  const [checked,   setChecked]   = useState<Set<number>>(new Set());
+  const [exporting,    setExporting]    = useState(false);
+  const [todoExporting, setTodoExporting] = useState(false);
+  const [todoCopied,   setTodoCopied]   = useState(false);
+  const [checked,      setChecked]      = useState<Set<number>>(new Set());
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function load() {
@@ -104,6 +106,28 @@ export function PostMeeting() {
     if (!sessionId || exporting) return;
     setExporting(true);
     try { await window.api.export.markdown(sessionId); } finally { setExporting(false); }
+  }
+
+  function buildCopyText(todos: NonNullable<typeof m>['todos']): string {
+    const lines = ['■ ToDo'];
+    todos.forEach(td => {
+      const owner = td.assignee ? `担当: ${td.assignee}` : '担当: 未定';
+      lines.push(`・${td.task}（${owner}）`);
+    });
+    return lines.join('\n');
+  }
+
+  async function handleTodoCopy() {
+    if (!m) return;
+    await navigator.clipboard.writeText(buildCopyText(m.todos));
+    setTodoCopied(true);
+    setTimeout(() => setTodoCopied(false), 2000);
+  }
+
+  async function handleTodoExport() {
+    if (!sessionId || todoExporting) return;
+    setTodoExporting(true);
+    try { await window.api.export.todoMarkdown(sessionId); } finally { setTodoExporting(false); }
   }
 
   async function handleRetry(step: PipelineStep) {
@@ -256,6 +280,18 @@ export function PostMeeting() {
 
         {tab === 'todos' && (
           <div className="w-full">
+            {m && m.todos.length > 0 && (
+              <div className="flex gap-2 mb-4">
+                <button onClick={handleTodoCopy}
+                  className="px-3 py-1.5 text-xs border border-border rounded-lg text-text-dim hover:text-text-primary hover:border-text-muted transition-colors">
+                  {todoCopied ? t.post.todoCopied : t.post.todoCopy}
+                </button>
+                <button onClick={handleTodoExport} disabled={todoExporting}
+                  className="px-3 py-1.5 text-xs border border-border rounded-lg text-text-dim hover:text-text-primary hover:border-text-muted transition-colors disabled:opacity-40">
+                  {todoExporting ? '…' : t.post.todoExport}
+                </button>
+              </div>
+            )}
             {!m || m.todos.length === 0 ? <p className="text-sm text-text-muted">{t.post.noTodos}</p> : (
               <table className="w-full text-sm border-collapse">
                 <thead>

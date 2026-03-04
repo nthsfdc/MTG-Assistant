@@ -25,4 +25,18 @@ export function registerExportIpc(): void {
     const { mediaService } = await import('../services/media.service');
     return mediaService.probe(filePath);
   });
+
+  ipcMain.handle('export:todoMarkdown', async (_, { sessionId }: { sessionId: string }) => {
+    const minutes  = fileStore.readJson<MeetingMinutes>(sessionId, 'minutes.json');
+    const todos    = minutes?.data?.todos ?? [];
+    const lines    = ['# ToDo', ''];
+    todos.forEach(t => {
+      const owner    = t.assignee ? `担当: ${t.assignee}` : '担当: 未定';
+      const deadline = t.deadline ? `　期限: ${t.deadline}` : '';
+      lines.push(`- [ ] ${t.task}（${owner}${deadline}）`);
+    });
+    const filePath = fileStore.writeMd(sessionId, 'todo.md', lines.join('\n'));
+    await shell.openPath(filePath);
+    return { filePath };
+  });
 }
