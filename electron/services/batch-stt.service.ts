@@ -61,12 +61,14 @@ async function transcribeSingle(
     ...(lang !== 'multi' ? { language: lang } : {}),
   }));
   const segs = (resp as unknown as { segments: Array<{ text: string; start: number; end: number }> }).segments ?? [];
+  // speakerId: Whisper-1 has no diarization; 'speaker_0' is a static placeholder.
+  // lang: preserve 'multi' so the downstream LangDetect step can assign detectedLang per segment.
   return segs.filter(s => s.text.trim()).map(s => ({
     id:        uuidv4(),
     sessionId,
     speakerId: 'speaker_0',
     text:      s.text.trim(),
-    lang:      lang === 'multi' ? 'ja' : lang,
+    lang,
     startMs:   Math.round(s.start * 1000) + offsetMs,
     endMs:     Math.round(s.end   * 1000) + offsetMs,
   }));
@@ -128,15 +130,30 @@ class BatchSttService {
       for (const chunk of chunks) {
         const offsetMs = Math.round(chunk.offsetSec * 1000);
         const segs = await transcribeSingle(client, chunk.path, lang, sessionId, offsetMs);
-        // Levenshtein dedup guard at chunk boundaries (≥0.95 similarity → skip)
+
+        // Defensive boundary dedup guard (BL-003).
+        // Chunks have NO audio overlap (ffmpeg stream-copy exact cut), so genuine duplicates
+        // are rare. This guard defends against unusual Whisper output at silence/boundary
+        // artifacts where Whisper may re-emit 1–3 near-identical segments.
+        // Safety cap K=3: never drops more than 3 leading segments to avoid losing real content.
         if (allSegments.length > 0 && segs.length > 0) {
-          const lastText = allSegments[allSegments.length - 1].text;
-          const firstText = segs[0].text;
-          if (similarity(lastText, firstText) >= 0.95) {
-            logger.info('[BatchSTT] dedup: skipping duplicate boundary segment');
-            segs.shift();
+          const DEDUP_THRESHOLD = 0.95;
+          const MAX_DEDUP_K = 3;
+          let dropped = 0;
+          while (dropped < MAX_DEDUP_K && segs.length > 0) {
+            const lastKeptText = allSegments[allSegments.length - 1].text;
+            if (similarity(lastKeptText, segs[0].text) >= DEDUP_THRESHOLD) {
+              segs.shift();
+              dropped++;
+            } else {
+              break;
+            }
+          }
+          if (dropped > 0) {
+            logger.info('[BatchSTT] dedup: dropped boundary duplicates', { sessionId, count: dropped });
           }
         }
+
         allSegments.push(...segs);
       }
       return allSegments;

@@ -1,11 +1,122 @@
 # MTG Assistant Backlog
 
-Project: MTG Assistant  
-Architecture: Electron + React + TypeScript  
+Project: MTG Assistant
+Architecture: Electron + React + TypeScript
 Design: v1.4.0-lite (Batch Processing Only)
 
 Purpose:
 Track all product improvements without losing discussion context.
+
+---
+
+# Batch STT Reliability (BL series)
+
+Scoped to `batch-stt.service.ts` and the Whisper upload pipeline.
+See `doc/DISCUSSION.md` for design decisions behind these items.
+
+---
+
+## BL-001 — Validate WAV file size = 0 before calling Whisper
+
+Priority: P0
+Status: Done
+Files: `electron/services/batch-stt.service.ts`
+
+Problem
+Calling Whisper with an empty WAV file results in an opaque API error.
+
+Done Criteria
+- If `fs.statSync(wavPath).size === 0`, throw a typed error with human-readable message before any Whisper request.
+- Pipeline surfaces the error at `batch_stt` step as recoverable.
+- Logs must NOT include audio content or API key.
+
+---
+
+## BL-002 — Do NOT coerce segment.lang from 'multi' to 'ja'
+
+Priority: P0
+Status: Done
+Files: `electron/services/batch-stt.service.ts`
+
+Problem
+`transcribeSingle()` forced `segment.lang = 'ja'` when user hint is `'multi'`, preventing the downstream `LangDetect` step from running correctly.
+
+Done Criteria
+- `TranscriptSegment.lang` is set to the user-hint lang directly (no 'multi'→'ja' coercion).
+- When lang is `'multi'`, segment.lang is `'multi'`, not `'ja'`.
+- `LangDetect` step still runs and overwrites `detectedLang` per segment.
+
+---
+
+## BL-003 — Robust boundary dedup: handle multiple short duplicate segments
+
+Priority: P0
+Status: Done
+Files: `electron/services/batch-stt.service.ts`
+
+Problem
+Old dedup only called `segs.shift()` once. If Whisper emitted 2–3 near-duplicate segments at a chunk boundary, only the first was dropped.
+
+Done Criteria
+- Loop drops ALL leading duplicate segments in new chunk (up to K=3).
+- Each iteration compares last kept segment text vs candidate text (normalized).
+- Loop breaks immediately when similarity < threshold or K exceeded.
+- Logs dropped count per boundary.
+- Does NOT drop real content beyond K guard.
+
+---
+
+## BL-004 — Unit tests: wav 0 bytes, multi lang, multi-segment dedup
+
+Priority: P1
+Status: Done
+Files: `tests/unit/batch-stt-boundary.test.ts`
+
+Done Criteria
+- Test: WAV 0 bytes → clear error message thrown (no API call).
+- Test: `lang='multi'` → segment.lang stays `'multi'` (no 'ja' coercion).
+- Test: 3 consecutive near-duplicate leading segments → all 3 dropped, real 4th kept.
+- Test: non-duplicate first segment → nothing dropped.
+
+---
+
+## BL-005 — Stable error codes + safe error messages for Batch STT failures
+
+Priority: P1
+Status: Todo
+Files: `electron/services/batch-stt.service.ts`, `electron/ipc/session.ipc.ts`
+
+Done Criteria
+- Define typed error codes: `STT_EMPTY_WAV`, `STT_CHUNK_MISSING`, `STT_API_413`, `STT_API_401`, etc.
+- Error messages shown to user are human-readable and contain no secrets or file contents.
+- Log includes error code and sessionId only (no transcript text, no API key).
+
+---
+
+## BL-006 — Optional: p-limit concurrency guard for Whisper chunk uploads
+
+Priority: P2
+Status: Todo
+Files: `electron/services/batch-stt.service.ts`
+
+Done Criteria
+- Chunks currently uploaded sequentially; this is safe but slow for 5+ chunks.
+- If concurrency is added, use `p-limit(2)` to avoid HTTP 429.
+- Must still respect chunk ordering for offset calculation.
+- Only implement if chunk count is a real UX pain point (>3 chunks).
+
+---
+
+## BL-007 — SpeakerId fallback naming consistency
+
+Priority: P2
+Status: Todo
+Files: `electron/services/batch-stt.service.ts`
+
+Done Criteria
+- All segments use `speakerId: 'speaker_0'` as placeholder (no diarization).
+- Add code comment: `// Whisper-1 does not provide diarization; speakerId is a placeholder`.
+- Future: when diarization is added, this is the single touch point.
 
 ---
 
