@@ -97,7 +97,7 @@ const _JA_PRED_ALT = [
 ].join('|');
 
 // Conjunctive particles/forms that indicate the sentence is NOT yet complete.
-const _JA_EXCL = String.raw`(?![。\n、]|が|ので|のに|けど|けれど|から|し[、。\s]|り|と|て|ても|たら|ながら|ば|かと)`;
+const _JA_EXCL = String.raw`(?![。\n、]|が|ので|のに|けど|けれど|から|し[、。\s]|り|ら|か|と|て|ても|たら|ながら|ば|かと)`;
 
 // MID: used inside buildTranscriptParagraphs — defers end-of-text predicates to next segment.
 const JA_PREDICATES_MID   = new RegExp(`(${_JA_PRED_ALT})${_JA_EXCL}(?=[\\s\\S])`, 'g');
@@ -112,6 +112,7 @@ function normalizeJapanesePunctuation(text: string, final = false): string {
     .replace(JA_CONNECTORS, ' $1')                                      // remove incorrect 。 before connectors
     .replace(/。\s*(ではなく)/g, '、$1')                                  // 。ではなく → 、ではなく (continuation, not sentence end)
     .replace(/(ではなく)。/g, '$1')                                        // ではなく。 → ではなく (strip false 。 so segment stays incomplete)
+    .replace(/。\s*([ねよ])([。！？])/g, '$1$2')                           // 。ね。 → ね。 / 。よ。 → よ。 (reattach sentence-final particle)
     .replace(final ? JA_PREDICATES_FINAL : JA_PREDICATES_MID, '$1。\n') // add sentence break after predicate endings
     .replace(/。\n\n+/g, '。\n');                                        // collapse multiple blank lines
 }
@@ -228,20 +229,52 @@ function buildTranscriptParagraphs(
   }
 
   // Retroactively merge paragraphs whose first sentence starts with a JA continuation pattern.
-  // Occurs when Whisper adds 。 mid-utterance, causing the next segment ("かと思います" etc.)
-  // to appear as a separate block even though it continues the previous sentence.
+  // Occurs when Whisper adds 。 mid-utterance causing orphan continuations like "ら情報は",
+  // "かと思います", or an isolated question-particle "か" (from cut "ましたか" etc.).
   for (let i = result.length - 1; i > 0; i--) {
     const firstSent = result[i].sentences[0]?.trimStart() ?? '';
-    if (/^かと/.test(firstSent)) {
-      const prev = result[i - 1];
-      const li = prev.sentences.length - 1;
+    const prev = result[i - 1];
+    const li = prev.sentences.length - 1;
+
+    if (/^(かと|ら[^\s。]|でしょうか|ではないでしょうか)/.test(firstSent)) {
+      // Full merge: pull entire paragraph into previous
       prev.sentences[li] = prev.sentences[li].replace(/。\n?$/, '') + firstSent;
       prev.sentences.push(...result[i].sentences.slice(1));
       result.splice(i, 1);
+    } else if (/^か[はいさねよど]/.test(firstSent)) {
+      // Partial merge: Whisper cut "ましたか" → "ました。" + "かはい…"
+      // Move the orphan か to end of previous sentence; keep rest as new paragraph.
+      prev.sentences[li] = prev.sentences[li].replace(/。?\n?$/, '') + 'か。';
+      const rest = firstSent.slice(1).trimStart();
+      if (rest) result[i].sentences[0] = rest;
+      else {
+        result[i].sentences.shift();
+        if (result[i].sentences.length === 0) result.splice(i, 1);
+      }
+    } else if (/^[ねよ](?:[、。！？]|$)/.test(firstSent)) {
+      // Partial merge: Whisper cut "ですね、列は" → "です。" + "ね、列は…"
+      // Move ね/よ to end of previous sentence; strip leading 、 from remainder.
+      const particle = firstSent[0];
+      prev.sentences[li] = prev.sentences[li].replace(/。?\n?$/, '') + particle + '。';
+      const rest = firstSent.slice(1).replace(/^[、。！？]\s*/, '').trimStart();
+      if (rest) result[i].sentences[0] = rest;
+      else {
+        result[i].sentences.shift();
+        if (result[i].sentences.length === 0) result.splice(i, 1);
+      }
     }
   }
 
   return result;
+}
+
+const CIRCLED = ['①','②','③','④','⑤','⑥','⑦','⑧','⑨','⑩'];
+
+function sourceTimeToMs(st: string): number {
+  const parts = st.split(':').map(Number);
+  return parts.length === 3
+    ? (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000
+    : (parts[0] * 60 + parts[1]) * 1000;
 }
 
 function PriorityBadge({ p }: { p: TodoItem['priority'] }) {
@@ -261,6 +294,7 @@ export function PostMeeting() {
   const [todoCopied,   setTodoCopied]   = useState(false);
   const [checked,      setChecked]      = useState<Set<number>>(new Set());
   const [pipelineExpanded, setPipelineExpanded] = useState(true);
+  const [scrollToMs, setScrollToMs] = useState<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function load() {
@@ -286,6 +320,24 @@ export function PostMeeting() {
   useEffect(() => {
     if (detail?.status === 'done') setPipelineExpanded(false);
   }, [detail?.status]);
+
+  useEffect(() => {
+    if (scrollToMs === null || tab !== 'transcript') return;
+    const els = document.querySelectorAll<HTMLElement>('[data-start-ms]');
+    let best: HTMLElement | null = null;
+    let bestDiff = Infinity;
+    els.forEach(el => {
+      const diff = Math.abs(parseInt(el.dataset.startMs ?? '0') - scrollToMs);
+      if (diff < bestDiff) { bestDiff = diff; best = el; }
+    });
+    best?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setScrollToMs(null);
+  }, [scrollToMs, tab]);
+
+  function handleRefClick(source_time: string) {
+    setTab('transcript');
+    setScrollToMs(sourceTimeToMs(source_time));
+  }
 
   async function handleExport() {
     if (!sessionId || exporting) return;
@@ -351,6 +403,11 @@ export function PostMeeting() {
   // Build display paragraphs: join cross-segment split sentences, timestamp = earliest segment.
   const transcriptParagraphs = !detail.normalized ? [] :
     buildTranscriptParagraphs(detail.normalized, startMsById);
+
+  // Assign sequential ref numbers (①②③…) across all source_time items on the page.
+  let _refCounter = 0;
+  const decisionRef = (m?.decisions ?? []).map(d => d.source_time ? _refCounter++ : -1);
+  const todoRef     = (m?.todos     ?? []).map(t => t.source_time ? _refCounter++ : -1);
 
   const TABS: Tab[] = ['overview', 'transcript', 'todos'];
   const tabLabels: Record<Tab, string> = {
@@ -440,7 +497,10 @@ export function PostMeeting() {
                     <span>
                       {d.text}
                       {d.source_time && (
-                        <span className="block text-xs text-text-muted font-mono mt-0.5">└ {d.source_time}</span>
+                        <button onClick={() => handleRefClick(d.source_time!)}
+                          className="ml-1.5 text-xs text-accent/50 hover:text-accent transition-colors align-baseline">
+                          {CIRCLED[decisionRef[i]] ?? `[${d.source_time}]`}
+                        </button>
                       )}
                     </span>
                   </li>
@@ -474,11 +534,11 @@ export function PostMeeting() {
             {transcriptParagraphs.length === 0
               ? <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noTranscript}</p>
               : transcriptParagraphs.map((para, i) => (
-                <div key={i}>
+                <div key={i} data-start-ms={para.startMs ?? ''}>
                   {para.startMs != null && (
                     <div className="text-xs text-text-muted font-mono mb-1">{formatMs(para.startMs)}</div>
                   )}
-                  <p className="text-base text-text-primary leading-relaxed whitespace-pre-line">
+                  <p className="text-sm text-text-primary leading-relaxed whitespace-pre-line">
                     {para.sentences.join('\n')}
                   </p>
                 </div>
@@ -535,7 +595,10 @@ export function PostMeeting() {
                             <span>
                               <span className={`text-text-primary ${done ? 'line-through' : ''}`}>{todo.task}</span>
                               {todo.source_time && (
-                                <span className="block text-xs text-text-muted font-mono mt-0.5">└ {todo.source_time}</span>
+                                <button onClick={e => { e.stopPropagation(); handleRefClick(todo.source_time!); }}
+                                  className="ml-1.5 text-xs text-accent/50 hover:text-accent transition-colors align-baseline">
+                                  {CIRCLED[todoRef[i]] ?? `[${todo.source_time}]`}
+                                </button>
                               )}
                             </span>
                           </div>
