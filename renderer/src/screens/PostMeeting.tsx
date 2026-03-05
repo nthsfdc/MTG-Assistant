@@ -32,12 +32,9 @@ const JA_MID_END = /[をがはにへのでもとやてにをがはにへので�
 const INNER_SPACE_JA = /\s+(?=[をがはにへのでもとや])/g;
 
 function joinJa(prev: string, next: string): string {
-  const trimmedPrev = prev.trimEnd();
-  const trimmedNext = next.trimStart();
-  if (JA_MID_END.test(trimmedPrev) || JA_PARTICLE_START.test(trimmedNext))
-    return trimmedPrev + trimmedNext;
-  const base = JA_PUNCT.test(trimmedPrev) ? trimmedPrev : trimmedPrev + '。';
-  return base + trimmedNext;
+  // Simply concatenate — JA_PREDICATES handles 。 insertion after actual sentence endings.
+  // Adding 。 here caused false breaks at mid-sentence segment cuts (な、し、 etc.).
+  return prev.trimEnd() + next.trimStart();
 }
 
 function joinLatin(prev: string, next: string): string {
@@ -62,6 +59,19 @@ function normalizePunctuation(text: string): string {
     .replace(/。[、,]/g, '。')                  // "。、" "。," → "。"
     .replace(/[,.]\./g, '.')                   // ",." → "."
     .replace(/\.,/g, '.');                     // ".," → "."
+}
+
+const JA_CONNECTORS = /。\s*(こちら|そして|また|そのため|続いて|さらに)/g;
+// Do NOT insert 。 when predicate is followed by conjunctive particles (sentence continues).
+const JA_PREDICATES = /(です|ます|ました|でした|ください|します|できます|となります|になります|可能です)(?![。\n、]|が|ので|のに|けど|けれど|から|し[、。\s]|り)/g;
+
+/** Fix Japanese-specific punctuation artifacts (applied only when detectedLang === 'ja'). */
+function normalizeJapanesePunctuation(text: string): string {
+  return text
+    .replace(/。\s*。+/g, '。')        // collapse repeated 。
+    .replace(JA_CONNECTORS, ' $1')    // remove incorrect 。 before connectors
+    .replace(JA_PREDICATES, '$1。\n') // add sentence break after predicate endings
+    .replace(/。\n\n+/g, '。\n');     // collapse multiple blank lines
 }
 
 /** Split text into individual sentences on terminal punctuation. */
@@ -118,6 +128,63 @@ function mergeConsecutive(segs: NormalizedSegment[], startMsById: Map<string, nu
   return out;
 }
 
+/**
+ * Build transcript paragraphs with cross-segment sentence joining.
+ * Incomplete sentences (no terminal punctuation) are joined with the next segment,
+ * and the timestamp of the earliest contributing segment is used.
+ */
+function buildTranscriptParagraphs(
+  segs: NormalizedSegment[],
+  startMsById: Map<string, number>,
+): TranscriptParagraph[] {
+  const result: TranscriptParagraph[] = [];
+  let pendingText = '';
+  let pendingMs: number | undefined;
+
+  for (const seg of segs) {
+    const segMs = startMsById.get(seg.sourceId);
+    const base = normalizePunctuation(seg.normalizedText);
+    const clean = seg.detectedLang === 'ja' ? normalizeJapanesePunctuation(base) : base;
+    const isJa = seg.detectedLang === 'ja';
+
+    // Join with any incomplete sentence carried from the previous segment
+    const fullText = pendingText
+      ? (isJa ? joinJa(pendingText, clean) : joinLatin(pendingText, clean))
+      : clean;
+    const blockMs = pendingText ? pendingMs : segMs;
+
+    const sentences = splitSentences(fullText);
+    if (sentences.length === 0) { pendingText = fullText; pendingMs = blockMs; continue; }
+
+    const lastComplete = /[。！？!?]$/.test(sentences[sentences.length - 1].trim());
+    if (lastComplete) {
+      groupParagraphs(sentences).forEach((sents, gi) =>
+        result.push({ startMs: gi === 0 ? blockMs : undefined, sentences: sents }));
+      pendingText = ''; pendingMs = undefined;
+    } else {
+      // Flush complete sentences; carry the trailing incomplete fragment forward
+      const complete = sentences.slice(0, -1);
+      const incomplete = sentences[sentences.length - 1];
+      if (complete.length > 0) {
+        groupParagraphs(complete).forEach((sents, gi) =>
+          result.push({ startMs: gi === 0 ? blockMs : undefined, sentences: sents }));
+        pendingMs = segMs;  // incomplete fragment belongs to this segment's time
+      } else {
+        pendingMs = blockMs; // still part of the earlier block
+      }
+      pendingText = incomplete;
+    }
+  }
+
+  if (pendingText) {
+    const sentences = splitSentences(pendingText);
+    groupParagraphs(sentences.length > 0 ? sentences : [pendingText]).forEach((sents, gi) =>
+      result.push({ startMs: gi === 0 ? pendingMs : undefined, sentences: sents }));
+  }
+
+  return result;
+}
+
 function PriorityBadge({ p }: { p: TodoItem['priority'] }) {
   const { t } = useT();
   const c = { high: 'text-red-400 bg-red-500/10', medium: 'text-amber-400 bg-amber-500/10', low: 'text-text-muted bg-surface-2' }[p];
@@ -134,6 +201,7 @@ export function PostMeeting() {
   const [todoExporting, setTodoExporting] = useState(false);
   const [todoCopied,   setTodoCopied]   = useState(false);
   const [checked,      setChecked]      = useState<Set<number>>(new Set());
+  const [pipelineExpanded, setPipelineExpanded] = useState(true);
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function load() {
@@ -155,6 +223,10 @@ export function PostMeeting() {
     });
     return () => { if (pollRef.current) clearTimeout(pollRef.current); unsub(); };
   }, [sessionId]);
+
+  useEffect(() => {
+    if (detail?.status === 'done') setPipelineExpanded(false);
+  }, [detail?.status]);
 
   async function handleExport() {
     if (!sessionId || exporting) return;
@@ -206,16 +278,20 @@ export function PostMeeting() {
   const isError = detail.status === 'error' || detail.status === 'error_recoverable';
   const m = detail.minutes?.data;
 
+  // Compute overall pipeline percent for the thin header progress bar (UI-002)
+  const pipelineSteps = detail.pipeline?.steps ?? [];
+  const pipelineTotal = pipelineSteps.length;
+  const pipelineDoneCount = pipelineSteps.filter(s => s.status === 'done').length;
+  const pipelineRunningIdx = pipelineSteps.findIndex(s => s.status === 'running');
+  const pipelineCurrent = pipelineRunningIdx >= 0 ? pipelineRunningIdx : pipelineDoneCount;
+  const pipelinePct = pipelineTotal > 0 ? Math.round((pipelineCurrent / pipelineTotal) * 100) : 0;
+
   // Build sourceId → startMs lookup from raw segments (used for timestamps only; raw text not shown)
   const startMsById = new Map<string, number>(detail.segments.map(s => [s.id, s.startMs]));
 
-  // Build display paragraphs for 文字起こし tab
-  const transcriptParagraphs: TranscriptParagraph[] = !detail.normalized ? [] :
-    mergeConsecutive(detail.normalized, startMsById).flatMap(blk => {
-      const groups = groupParagraphs(splitSentences(normalizePunctuation(blk.normalizedText)));
-      if (groups.length === 0) return [{ startMs: blk.startMs, sentences: [blk.normalizedText] }];
-      return groups.map((sents, gi) => ({ startMs: gi === 0 ? blk.startMs : undefined, sentences: sents }));
-    });
+  // Build display paragraphs: join cross-segment split sentences, timestamp = earliest segment.
+  const transcriptParagraphs = !detail.normalized ? [] :
+    buildTranscriptParagraphs(detail.normalized, startMsById);
 
   const TABS: Tab[] = ['overview', 'transcript', 'todos'];
   const tabLabels: Record<Tab, string> = {
@@ -246,14 +322,31 @@ export function PostMeeting() {
         </button>
       </div>
 
+      {/* UI-002: Thin overall progress bar — visible only while processing */}
+      {isProcessing && (
+        <div className="h-0.5 bg-surface-2 flex-shrink-0">
+          <div className="h-0.5 bg-accent transition-all duration-500" style={{ width: `${pipelinePct}%` }} />
+        </div>
+      )}
+
+      {/* UI-001: Pipeline panel — always visible when processing/error; collapsible when done */}
       {(isProcessing || isError || detail.pipeline) && (
         <div className="px-6 py-3 border-b border-border bg-surface/50">
-          <PipelineProgress
-            pipeline={detail.pipeline}
-            status={detail.status}
-            onRetry={handleRetry}
-            onResume={handleResume}
-          />
+          {detail.status === 'done' && (
+            <button
+              onClick={() => setPipelineExpanded(v => !v)}
+              className="text-xs text-text-muted hover:text-text-primary transition-colors flex items-center gap-1 mb-2">
+              処理ログ {pipelineExpanded ? '▲' : '▼'}
+            </button>
+          )}
+          {(detail.status !== 'done' || pipelineExpanded) && (
+            <PipelineProgress
+              pipeline={detail.pipeline}
+              status={detail.status}
+              onRetry={handleRetry}
+              onResume={handleResume}
+            />
+          )}
         </div>
       )}
 
@@ -274,13 +367,13 @@ export function PostMeeting() {
 
       <div className="flex-1 overflow-y-auto p-6">
         {tab === 'overview' && m && (
-          <div className="w-full space-y-6">
-            <div>
+          <div className="w-full space-y-3">
+            <div className="rounded-xl bg-surface/50 border border-border p-4">
               <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.purpose}</h3>
               <p className="text-sm text-text-dim leading-relaxed">{m.purpose}</p>
             </div>
             {m.decisions.length > 0 && (
-              <div>
+              <div className="rounded-xl bg-surface/50 border border-border p-4">
                 <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.decisions}</h3>
                 <ul className="space-y-1.5">{m.decisions.map((d: DecisionItem, i: number) => (
                   <li key={i} className="flex gap-2 text-sm text-text-dim">
@@ -296,7 +389,7 @@ export function PostMeeting() {
               </div>
             )}
             {m.concerns.length > 0 && (
-              <div>
+              <div className="rounded-xl bg-surface/50 border border-border p-4">
                 <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.concerns}</h3>
                 <ul className="space-y-1.5">{m.concerns.map((c, i) => (
                   <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-amber-400 mt-0.5">!</span>{c}</li>
@@ -304,7 +397,7 @@ export function PostMeeting() {
               </div>
             )}
             {m.next_actions.length > 0 && (
-              <div>
+              <div className="rounded-xl bg-surface/50 border border-border p-4">
                 <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">{t.post.nextActions}</h3>
                 <ul className="space-y-1.5">{m.next_actions.map((a, i) => (
                   <li key={i} className="flex gap-2 text-sm text-text-dim"><span className="text-text-muted mt-0.5">→</span>{a}</li>
@@ -318,7 +411,7 @@ export function PostMeeting() {
         )}
 
         {tab === 'transcript' && (
-          <div className="max-w-3xl space-y-5">
+          <div className="w-full space-y-5">
             {transcriptParagraphs.length === 0
               ? <p className="text-sm text-text-muted">{isProcessing ? t.post.generating : t.post.noTranscript}</p>
               : transcriptParagraphs.map((para, i) => (

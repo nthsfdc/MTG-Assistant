@@ -9,6 +9,177 @@ Track all product improvements without losing discussion context.
 
 ---
 
+# UI/UX Polish v1.2
+
+Scoped to renderer UI components only. No pipeline logic changes.
+
+---
+
+## UI-001 — Hide pipeline progress for completed sessions
+
+Priority: P0
+Status: Done ✅
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Description
+When user opens a session where `status === 'done'`, the pipeline progress panel is hidden by default. A toggle "処理ログ ▼" lets the user expand it on demand. Auto-collapses on status change to `done`.
+
+Done Criteria
+- Pipeline panel hidden by default when status=done.
+- "処理ログ" toggle button visible, expands/collapses panel.
+- Pipeline visible immediately when status=processing or error.
+
+---
+
+## UI-002 — Thin overall progress bar in header
+
+Priority: P0
+Status: Done ✅
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Description
+A 2px accent-colored bar runs across the full width below the page header, visible only while `status === 'processing'`. Shows overall pipeline percent.
+
+Done Criteria
+- Thin progress bar visible only during processing.
+- Animates smoothly with `transition-all`.
+- Disappears when done/error.
+
+---
+
+## UI-003 — Compact horizontal stepper in PipelineProgress
+
+Priority: P0
+Status: Done ✅
+Files: `renderer/src/components/PipelineProgress.tsx`
+
+Description
+Replace the verbose vertical step list with a compact inline stepper. Steps shown left-to-right separated by `→`. Icons: ✔ done / ▶ running / ○ pending / ✖ error. Short labels: audio → STT → lang → norm → AI → export.
+
+Done Criteria
+- Steps rendered horizontally in one row.
+- Icons match: ✔/▶/○/✖.
+- Retry button inline with error step.
+- Resume button below stepper when error_recoverable.
+- No redundant progress bar inside PipelineProgress (moved to header).
+
+---
+
+## UI-004 — Tabs layout
+
+Priority: P0
+Status: Done
+Files: `renderer/src/screens/PostMeeting.tsx`, `renderer/src/i18n/locales.ts`
+
+Description
+Tabs are: 要約 / 文字起こし / Todo. Spacing and readability improved.
+
+---
+
+## UI-005 — Transcript layout
+
+Priority: P0
+Status: Done
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Description
+Paragraph grouping, [mm:ss] timestamps, max-w-3xl container. Implemented in previous iteration.
+
+---
+
+## UI-006 — Tailwind layout polish
+
+Priority: P1
+Status: Done ✅
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Description
+Overview tab uses max-w-2xl. Todos tab uses max-w-3xl. Rounded cards for section blocks in overview.
+文字起こし tab uses w-full (fullwidth) to maximise reading area.
+
+Done Criteria
+- Content areas have consistent max-width.
+- Overview sections have rounded card styling.
+- 文字起こし tab fills full available width.
+
+---
+
+## UI-009 — Fix false 。 insertion before conjunctive particles (ますが/ますので/でしたり etc.)
+
+Priority: P1
+Status: Done ✅
+Date: 2026-03-04 (updated 2026-03-05)
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Problem
+`JA_PREDICATES` regex inserts `。\n` after predicate endings (ます/です/etc.) even when followed by particles that continue the sentence:
+- `ますが` → was becoming `ます。\nが...`
+- `ますので` → was becoming `ます。\nので...`
+- `ですが` / `ですので` / `ですけど` / `ですから` etc.
+- `でしたり` → was becoming `でした。\nり...` (〜たり conjunction form)
+
+Fix
+Extend negative lookahead of `JA_PREDICATES` to exclude conjunctive particles:
+```
+(?![。\n、]|が|ので|のに|けど|けれど|から|し[、。\s]|り)
+```
+- `が` — 逆接 (but/however)
+- `ので` / `のに` — 理由・逆説 (because / although)
+- `けど` / `けれど` — 逆接 (but)
+- `から` — 理由 (because/from)
+- `し[、。\s]` — 列挙 (listing, e.g. ますし、)
+- `り` — 〜たり conjunction (e.g. でしたり、しましたり)
+
+Done Criteria
+- `ますが`、`ますので`、`ですが`、`ですので`、`ですけど`、`ますから`、`ますし` do NOT get `。` inserted.
+- `でしたり`、`しましたり` do NOT get `。` inserted.
+- Standalone predicate endings (not followed by conjunctives) still get `。` inserted correctly.
+
+---
+
+## UI-008 — Fix 文字起こし timestamps: cross-segment sentence joining
+
+Priority: P0
+Status: Done ✅
+Date: 2026-03-04
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Problem
+Timestamp `[mm:ss]` chỉ hiển thị ở đoạn đầu tiên vì `mergeConsecutive` gộp toàn bộ segment `speaker_0` thành 1 block duy nhất. Các đoạn sau (do `groupParagraphs` tạo ra) không có timestamp.
+
+Thêm vào đó, câu bị cắt ngang giữa 2 segment (Whisper cut mid-sentence) khiến transcript hiển thị không tự nhiên.
+
+Fix (`buildTranscriptParagraphs`)
+- Xử lý từng `NormalizedSegment`, normalize text.
+- Nếu đoạn cuối của segment chưa kết thúc bằng dấu câu terminal (`。！？!?`), tích lũy vào `pendingText` và join với segment tiếp theo.
+- Timestamp của đoạn join = `startMs` của segment **đầu tiên** đóng góp vào câu đó.
+- Các câu hoàn chỉnh được flush với timestamp chính xác; phần dư mang sang segment kế.
+
+Done Criteria
+- Mỗi đoạn văn hiển thị timestamp `[mm:ss]` đúng với vị trí audio.
+- Câu bị Whisper cắt ngang được nối tự nhiên (không xuống dòng giữa câu).
+- Timestamp = startMs của segment mà câu bắt đầu từ đó.
+- EN/VI segments không bị ảnh hưởng.
+
+---
+
+## UI-007 — 文字起こし tab fullwidth layout
+
+Priority: P1
+Status: Done ✅
+Date: 2026-03-04
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Description
+Remove `max-w-3xl` width cap on the 文字起こし (transcript) tab so the text fills the full panel width.
+Useful when the app window is large or when the transcript contains long lines.
+
+Done Criteria
+- 文字起こし container uses `w-full` instead of `max-w-3xl`.
+- No other layout changes.
+
+---
+
 # Batch STT Reliability (BL series)
 
 Scoped to `batch-stt.service.ts` and the Whisper upload pipeline.
@@ -108,6 +279,35 @@ Description
 Done Criteria
 - 文字起こし is readable written-style text with `[mm:ss]` timestamp prefix per paragraph.
 - Raw transcript is NOT rendered anywhere in the UI.
+
+---
+
+## BL-013 — Fix incorrect「。」punctuation in Japanese transcript
+
+Priority: P1 (High)
+Status: Done ✅
+Date: 2026-03-04
+Files: `renderer/src/screens/PostMeeting.tsx`
+Estimate: ~0.5 day
+
+Problem
+Whisper STT output for Japanese speech often produces incorrect「。」mid-sentence:
+- Duplicate periods: "。。" or "。 。"
+- Wrong period before connectors: "。こちら", "。そして", "。また", "。そのため", "。続いて", "。さらに"
+- Missing sentence breaks after predicate endings not followed by 。
+
+Fix
+Added `normalizeJapanesePunctuation(text)` applied after `normalizePunctuation()`, only for `detectedLang === 'ja'` blocks in the transcript paragraph builder:
+- Rule a) Collapse repeated 。: `"。。+" → "。"`
+- Rule b) Remove incorrect 。 before connectors: `"。こちら" → " こちら"`
+- Rule c) Insert sentence break after predicate endings (です/ます/ました/でした/ください/します/できます/となります/になります/可能です) not already followed by 。 or newline
+
+Acceptance Criteria
+- No "、。" or "。。" in displayed transcript.
+- Fewer mid-sentence 。 before connectors (こちら/そして/また/そのため/続いて/さらに).
+- Sentence breaks added after predicate endings.
+- No change to Whisper/STT chunking or pipeline behavior.
+- EN/VI segments unaffected.
 
 ---
 
