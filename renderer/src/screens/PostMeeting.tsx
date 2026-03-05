@@ -62,16 +62,58 @@ function normalizePunctuation(text: string): string {
 }
 
 const JA_CONNECTORS = /。\s*(こちら|そして|また|そのため|続いて|さらに)/g;
-// Do NOT insert 。 when predicate is followed by conjunctive particles (sentence continues).
-const JA_PREDICATES = /(です|ます|ました|でした|ください|します|できます|となります|になります|可能です)(?![。\n、]|が|ので|のに|けど|けれど|から|し[、。\s]|り)/g;
 
-/** Fix Japanese-specific punctuation artifacts (applied only when detectedLang === 'ja'). */
-function normalizeJapanesePunctuation(text: string): string {
+// Sentence-ending predicate patterns for Japanese meeting transcripts.
+// Rules:
+//   1. Compound patterns (longer) come BEFORE their shorter suffixes — regex tries left-to-right,
+//      so "ますよね" must precede "ますよ" which must precede "ます".
+//      This ensures 。 is inserted AFTER the full expression, not mid-compound.
+//   2. Negative lookahead excludes conjunctive particles that continue the sentence.
+//   3. MID variant: requires (?=[\s\S]) so trailing predicates at end-of-string are NOT
+//      terminated yet — we wait until the next segment joins before deciding.
+//   4. FINAL variant: no (?=[\s\S]) — terminates trailing predicates at flush time.
+const _JA_PRED_ALT = [
+  // ── Multi-word / keigo endings ────────────────────────────────────────────
+  'ませんでした', 'ていました', 'ておりました', 'ていません', 'ています', 'ております',
+  'かもしれません', '必要があります', '問題ありません',
+  'お願いいたします', 'お願いします',
+  'いたしました', 'いたします', 'ございました', 'ございます',
+  'いただきました', 'いただきます',
+  'てください', 'しましょう',
+  'いかがでしょうか', 'ではないでしょうか', 'でしょうか',
+  'ということです', 'という感じです', 'という形です',
+  'と思っています', 'と思います', 'と思いました', 'と考えています',
+  // ── predicate + sentence-final particle (longest first within each group) ─
+  // ね/よ after predicate = sentence-final nuance; must match as unit so 。 goes after particle
+  'ますよね', 'ましたよね', 'ですよね', 'でしたよね',
+  'ましたね', 'ますね',   'でしたね', 'ですね',
+  'ましたよ', 'ますよ',   'でしたよ', 'ですよ',
+  // か = polite question; treat whole "predicate+か" as sentence end
+  'ませんか', 'ましたか', 'ますか', 'でしたか', 'ですか',
+  // ── Simple polite endings ─────────────────────────────────────────────────
+  'ました', 'でした', 'ません',
+  'します', 'できます', 'となります', 'になります', 'ありません', 'あります',
+  'です', 'ます', 'ください',
+].join('|');
+
+// Conjunctive particles/forms that indicate the sentence is NOT yet complete.
+const _JA_EXCL = String.raw`(?![。\n、]|が|ので|のに|けど|けれど|から|し[、。\s]|り|と|て|ても|たら|ながら|ば|かと)`;
+
+// MID: used inside buildTranscriptParagraphs — defers end-of-text predicates to next segment.
+const JA_PREDICATES_MID   = new RegExp(`(${_JA_PRED_ALT})${_JA_EXCL}(?=[\\s\\S])`, 'g');
+// FINAL: used at final flush — also terminates trailing predicates.
+const JA_PREDICATES_FINAL = new RegExp(`(${_JA_PRED_ALT})${_JA_EXCL}`, 'g');
+
+/** Fix Japanese-specific punctuation artifacts (applied only when detectedLang === 'ja').
+ *  Pass final=true at end-of-stream to also add 。 to trailing predicates. */
+function normalizeJapanesePunctuation(text: string, final = false): string {
   return text
-    .replace(/。\s*。+/g, '。')        // collapse repeated 。
-    .replace(JA_CONNECTORS, ' $1')    // remove incorrect 。 before connectors
-    .replace(JA_PREDICATES, '$1。\n') // add sentence break after predicate endings
-    .replace(/。\n\n+/g, '。\n');     // collapse multiple blank lines
+    .replace(/。\s*。+/g, '。')                                          // collapse repeated 。
+    .replace(JA_CONNECTORS, ' $1')                                      // remove incorrect 。 before connectors
+    .replace(/。\s*(ではなく)/g, '、$1')                                  // 。ではなく → 、ではなく (continuation, not sentence end)
+    .replace(/(ではなく)。/g, '$1')                                        // ではなく。 → ではなく (strip false 。 so segment stays incomplete)
+    .replace(final ? JA_PREDICATES_FINAL : JA_PREDICATES_MID, '$1。\n') // add sentence break after predicate endings
+    .replace(/。\n\n+/g, '。\n');                                        // collapse multiple blank lines
 }
 
 /** Split text into individual sentences on terminal punctuation. */
@@ -138,29 +180,30 @@ function buildTranscriptParagraphs(
   startMsById: Map<string, number>,
 ): TranscriptParagraph[] {
   const result: TranscriptParagraph[] = [];
-  let pendingText = '';
+  let pendingRaw = '';
   let pendingMs: number | undefined;
 
   for (const seg of segs) {
     const segMs = startMsById.get(seg.sourceId);
     const base = normalizePunctuation(seg.normalizedText);
-    const clean = seg.detectedLang === 'ja' ? normalizeJapanesePunctuation(base) : base;
     const isJa = seg.detectedLang === 'ja';
 
-    // Join with any incomplete sentence carried from the previous segment
-    const fullText = pendingText
-      ? (isJa ? joinJa(pendingText, clean) : joinLatin(pendingText, clean))
-      : clean;
-    const blockMs = pendingText ? pendingMs : segMs;
+    // Join raw texts first, then normalize the combined result.
+    // This allows cross-segment predicate+conjunctive detection (e.g. "できます" + "ので…").
+    const rawFull = pendingRaw
+      ? (isJa ? joinJa(pendingRaw, base) : joinLatin(pendingRaw, base))
+      : base;
+    const blockMs = pendingRaw ? pendingMs : segMs;
+    const fullText = isJa ? normalizeJapanesePunctuation(rawFull) : rawFull;
 
     const sentences = splitSentences(fullText);
-    if (sentences.length === 0) { pendingText = fullText; pendingMs = blockMs; continue; }
+    if (sentences.length === 0) { pendingRaw = rawFull; pendingMs = blockMs; continue; }
 
     const lastComplete = /[。！？!?]$/.test(sentences[sentences.length - 1].trim());
     if (lastComplete) {
       groupParagraphs(sentences).forEach((sents, gi) =>
         result.push({ startMs: gi === 0 ? blockMs : undefined, sentences: sents }));
-      pendingText = ''; pendingMs = undefined;
+      pendingRaw = ''; pendingMs = undefined;
     } else {
       // Flush complete sentences; carry the trailing incomplete fragment forward
       const complete = sentences.slice(0, -1);
@@ -172,14 +215,30 @@ function buildTranscriptParagraphs(
       } else {
         pendingMs = blockMs; // still part of the earlier block
       }
-      pendingText = incomplete;
+      pendingRaw = incomplete;
     }
   }
 
-  if (pendingText) {
-    const sentences = splitSentences(pendingText);
-    groupParagraphs(sentences.length > 0 ? sentences : [pendingText]).forEach((sents, gi) =>
+  if (pendingRaw) {
+    // Final flush: use FINAL variant so trailing predicates also get 。
+    const finalText = normalizeJapanesePunctuation(pendingRaw, true);
+    const sentences = splitSentences(finalText);
+    groupParagraphs(sentences.length > 0 ? sentences : [pendingRaw]).forEach((sents, gi) =>
       result.push({ startMs: gi === 0 ? pendingMs : undefined, sentences: sents }));
+  }
+
+  // Retroactively merge paragraphs whose first sentence starts with a JA continuation pattern.
+  // Occurs when Whisper adds 。 mid-utterance, causing the next segment ("かと思います" etc.)
+  // to appear as a separate block even though it continues the previous sentence.
+  for (let i = result.length - 1; i > 0; i--) {
+    const firstSent = result[i].sentences[0]?.trimStart() ?? '';
+    if (/^かと/.test(firstSent)) {
+      const prev = result[i - 1];
+      const li = prev.sentences.length - 1;
+      prev.sentences[li] = prev.sentences[li].replace(/。\n?$/, '') + firstSent;
+      prev.sentences.push(...result[i].sentences.slice(1));
+      result.splice(i, 1);
+    }
   }
 
   return result;

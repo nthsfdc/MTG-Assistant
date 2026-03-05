@@ -137,6 +137,52 @@ Done Criteria
 
 ---
 
+## UI-010 — JA sentence boundary: cross-segment fix + compound predicate patterns
+
+Priority: P1
+Status: Done ✅
+Date: 2026-03-05
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Problem 1 — Cross-segment false break
+`normalizeJapanesePunctuation` was called per-segment BEFORE joining. When segment N ended with a predicate (e.g. `できます`), the regex immediately added `。\n` and flushed the paragraph. Segment N+1 starting with `ので` / `と` / etc. appeared as a separate timestamp block.
+
+Example:
+```
+[01:30] ブラウザからアクセスできます。    ← false break
+[01:30] ので電子メールと…                ← should be same sentence
+```
+
+Fix 1
+Restructure `buildTranscriptParagraphs`:
+- Join raw segment text FIRST, then call `normalizeJapanesePunctuation` on the combined text.
+- Introduce `JA_PREDICATES_MID` (with `(?=[\s\S])`) — skips predicates at end-of-string so the decision is deferred until the next segment joins.
+- Introduce `JA_PREDICATES_FINAL` (no end-of-string guard) — used at final flush to terminate trailing predicates.
+- `pendingRaw` carries the raw incomplete fragment across segment boundaries.
+
+Problem 2 — Wrong 。 placement inside compounds
+Simple predicate `ます`/`です` matched before the full compound, splitting mid-expression:
+- `ますね` → `ます。\nね` (should be `ますね。\n`)
+- `ますか` → `ます。\nか` (should be `ますか。\n`)
+- `でしょうか` — not detected at all
+
+Fix 2
+Redesign `_JA_PRED_ALT` as an ordered array (longest compound first):
+- Compound / keigo endings: `ませんでした`, `ていました`, `ております`, `かもしれません`, `必要があります`, `問題ありません`, `いかがでしょうか`, `でしょうか`, `ということです`, `と思います`, `お願いします`, `ございます`, `いたします`, `いただきます`, `てください`, `しましょう` など
+- predicate+ね/よ/か as units: `ますよね`, `ましたね`, `ますね`, `ますよ`, `ますか`, `ですね`, `ですよ`, `ですか`, `でしょうか` etc. — must precede bare `ます`/`です`
+- Simple endings last: `ました`, `でした`, `ません`, `します`, `できます`, `です`, `ます`, `ください`
+
+Key insight: suffix-based matching means `ますね` catches ALL verb stems automatically
+(`ありますね`, `できますね`, `なりますね` etc.) without enumerating each verb.
+
+Done Criteria
+- `できますので電子メールと…` renders as ONE sentence (not split across two timestamp blocks).
+- `ですね`/`ますね`/`ますよ`/`ますか`/`でしょうか` each get `。\n` after the FULL expression.
+- `ますと`/`まして`/`ますても`/`ますたら`/`ますながら` do NOT get `。` inserted.
+- Final segment ending with bare predicate still gets `。` at flush time.
+
+---
+
 ## UI-008 — Fix 文字起こし timestamps: cross-segment sentence joining
 
 Priority: P0
@@ -311,6 +357,25 @@ Acceptance Criteria
 
 ---
 
+## UI-011 — Fix JA transcript: merge paragraphs starting with continuation pattern かと
+
+Priority: P1
+Status: Done ✅
+Date: 2026-03-05
+Files: `renderer/src/screens/PostMeeting.tsx`
+
+Problem
+Whisper sometimes inserts `。` mid-utterance causing a segment like `かと思います` to appear as a separate paragraph even though it continues the previous sentence (e.g. `…できると思います`).
+
+Fix
+After `buildTranscriptParagraphs`, retroactively merge any paragraph whose first sentence starts with `かと` into the preceding paragraph — strip the trailing `。` from the previous last sentence and concatenate.
+
+Done Criteria
+- `かと思います` / `かと考えています` etc. do not start a new timestamp block.
+- No change to EN/VI paragraphs.
+
+---
+
 ## BL-012 — Improve normalization rules and GPT rewrite prompt (optional)
 
 Priority: P1
@@ -371,159 +436,47 @@ These features must be implemented before testing with real users.
 
 ## 1. Actionable Todo UX
 
-Problem  
-Current Todo output is plain text and difficult to reuse in other tools.
+Status: Done ✅
+Date: 2026-03-05
+Files: `renderer/src/screens/PostMeeting.tsx`, `electron/ipc/export.ipc.ts`
 
-Goal  
-Allow users to easily copy or export todos.
-
-Features
-
-- Render todos as checklist items
-- Display optional fields:
-  - Owner
-  - Due date
-- Add buttons:
-  - Copy Todo
-  - Export Todo Markdown
-
-Example UI
-
-☐ HALST SQUAREでデータ連携処理を実行  
-担当: 佐藤  
-期限: 未定
-
-Buttons
-
-[Copy] [Export]
-
-Copy Output Format
-
-■ ToDo  
-・HALST SQUAREでデータ連携処理を実行（担当: 佐藤）
-
-Export File
-
-sessions/{sessionId}/todo.md
+- Checklist items with checkboxes, priority badges, assignee/deadline columns
+- Copy button (plain text format) + Export Markdown button
+- `source_time` shown below each task (`└ 01:12`)
 
 ---
 
 ## 2. Meeting Search
 
-Problem  
-Users cannot find past meetings easily when sessions increase.
+Status: Done ✅
+Date: 2026-03-05
+Files: `renderer/src/screens/Dashboard.tsx`, `electron/services/search-index.service.ts`, `electron/ipc/search.ipc.ts`
 
-Goal  
-Enable fast search across meeting data.
-
-Search Scope
-
-- meeting title
-- summary
-- todo
-- transcript
-
-Implementation
-
-Create search index file
-
-sessions/{id}/search_index.json
-
-Example
-
-{
-  "text": "AWS RDS 連携 デモ Salesforce API ..."
-}
-
-Search UI
-
-Search input on dashboard.
-
-Example
-
-Search meeting...
-
-Result
-
-AWS RDS連携デモ  
-Salesforce API検討MTG
+- Search input on Dashboard filters sessions by title + full-text index
+- `search_index.json` built after pipeline completes (title + purpose + decisions + todos + transcript)
+- Falls back to title-only for sessions without index (legacy)
 
 ---
 
 ## 3. Summary Evidence (Timestamp Source)
 
-Problem  
-Users cannot verify if AI summary is accurate.
+Status: Done ✅
+Date: 2026-03-05
+Files: `electron/services/post-meeting.service.ts`, `renderer/src/screens/PostMeeting.tsx`
 
-Goal  
-Attach transcript timestamp to each summary item.
-
-Example
-
-決定事項  
-✓ 社員名を半角に変換する  
-└ 00:42
-
-Todo  
-☐ HALST SQUAREで連携確認  
-└ 01:12
-
-Implementation
-
-Use transcript.jsonl
-
-Example segment
-
-{
- "text": "社員名を半角に変換する必要があります",
- "startMs": 42000
-}
-
-Convert
-
-42000 → 00:42
-
-Add field in minutes.json
-
-{
-  "decisions": [
-    {
-      "text": "社員名を半角に変換する",
-      "source_time": "00:42"
-    }
-  ]
-}
-
-Optional UI
-
-Click timestamp → jump to transcript.
+- `matchTimestamp()` attaches `source_time` to each decision and todo (word-overlap ≥30% against transcript segments)
+- Displayed as `└ 00:42` in 要約 tab (decisions) and Todo tab
 
 ---
 
 ## 4. Processing Progress Indicator
 
-Problem  
-Users cannot tell if the processing pipeline is progressing.
+Status: Done ✅
+Files: `renderer/src/screens/PostMeeting.tsx`, `renderer/src/components/PipelineProgress.tsx`
 
-Goal  
-Display clear pipeline progress.
-
-Example UI
-
-Processing meeting...
-
-████████░░░░░░░░░░
-60% completed
-
-Step 3 / 5
-
-Pipeline Steps
-
-1 prepare_audio  
-2 batch_stt  
-3 normalize  
-4 summarize  
-5 export
+- UI-001: Collapsible pipeline log panel (auto-collapse when done)
+- UI-002: Thin 2px accent progress bar in header (visible during processing)
+- UI-003: Compact horizontal stepper with icons ✔/▶/○/✖
 
 ---
 
@@ -587,21 +540,13 @@ userData/insights.json
 
 ## 6. Transcript Readability
 
-Improve transcript viewer.
+Status: Done ✅
+Date: 2026-03-05
 
-Enhancements
-
-- show timestamps
-- monospaced font
-- better spacing
-
-Example
-
-[00:02]  
-こんにちは
-
-[00:05]  
-本日はAWS RDS連携について説明します
+- Timestamps `[mm:ss]` per paragraph (UI-008)
+- Cross-segment sentence joining (UI-010)
+- Full-width layout (UI-007)
+- Japanese punctuation normalization (BL-013, UI-009, UI-011)
 
 ---
 
